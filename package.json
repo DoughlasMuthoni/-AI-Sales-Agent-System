@@ -1,0 +1,23 @@
+{
+  "name": "ai-sales-agent",
+  "version": "1.0.0",
+  "description": "AI Sales Agent for Solar Solutions and Borehole Drilling Services",
+  "main": "webhook.js",
+  "scripts": {
+    "start": "node webhook.js",
+    "dev": "nodemon webhook.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.19.2",
+    "nodemailer": "^8.0.10"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
