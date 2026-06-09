@@ -8,9 +8,9 @@ const { toolDefinitions } = require('../mcp/tools.js');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SESSION_TTL_MS    = 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS      = 24 * 60 * 60 * 1000;
 const MAX_LOOP_ITERATIONS = 10;
-const SESSIONS_FILE     = path.join(__dirname, '../../data/sessions.json');
+const SESSIONS_FILE       = path.join(__dirname, '../../data/sessions.json');
 
 // ── Persistent session store ──────────────────────────────────────────────────
 
@@ -54,8 +54,8 @@ const BOREHOLE_KEYWORDS = ['borehole', 'water', 'drilling', 'drill', 'pump', 'we
                            'waterless', 'harvest', 'supply'];
 
 function detectDomain(text) {
-  const lower        = text.toLowerCase();
-  const solarScore   = SOLAR_KEYWORDS.filter((kw) => lower.includes(kw)).length;
+  const lower         = text.toLowerCase();
+  const solarScore    = SOLAR_KEYWORDS.filter((kw) => lower.includes(kw)).length;
   const boreholeScore = BOREHOLE_KEYWORDS.filter((kw) => lower.includes(kw)).length;
   if (solarScore > boreholeScore) return 'solar';
   if (boreholeScore > solarScore) return 'borehole';
@@ -67,11 +67,13 @@ function detectDomain(text) {
 const GENERAL_PROMPT = `You are a friendly sales assistant for Waterlift Solar Limited, a premium company providing Solar Energy Solutions and Borehole Drilling Services across Kenya.
 
 Greet the customer warmly and ask which service they are interested in:
-1. ☀️ Solar Energy Solutions (backup power, grid-tied, solar water heating, solar pumping)
-2. 💧 Borehole Drilling Services (new drilling, rehabilitation, water pumping systems)
+1. Solar Energy Solutions (backup power, grid-tied, solar water heating, solar pumping)
+2. Borehole Drilling Services (new drilling, rehabilitation, water pumping systems)
 
 Once they indicate their interest, proceed as a specialist in that domain.
-Contact: +254 768 117 070 | support@waterliftsolar.africa`;
+Contact: +254 768 117 070 | support@waterliftsolar.africa
+
+Never use markdown headers or emojis. Keep responses short and conversational.`;
 
 function getSystemPrompt(domain) {
   if (domain === 'solar')    return SOLAR_SYSTEM_PROMPT;
@@ -89,38 +91,51 @@ const claudeTools = toolDefinitions.map((t) => ({
 
 async function processMessage(from, messageBody, messageId) {
   const now = Date.now();
-  // Load or create session
+
   let session = sessions.get(from);
   if (!session || now - session.lastSeen > SESSION_TTL_MS) {
-    session = { domain: null, messages: [], lastSeen: now, escalated: false };
+    session = { domain: null, messages: [], lastSeen: now, escalated: false, humanTakeover: false };
   }
 
-  // Only detect domain if not yet established
+  // Human has taken over — record the customer message but don't respond with AI
+  if (session.humanTakeover) {
+    session.lastSeen = now;
+    session.messages.push({ role: 'user', content: messageBody });
+    sessions.set(from, session);
+    saveSessions(sessions);
+    return;
+  }
+
   if (!session.domain) {
     session.domain = detectDomain(messageBody);
   }
 
   session.lastSeen = now;
-  session.messages.push({ role: 'user', content: messageBody });
+  session.messages.push({ role: 'user', content: messageBody, ts: now });
   sessions.set(from, session);
   saveSessions(sessions);
 
   await sendTypingIndicator(from, messageId);
 
-  const systemPrompt    = getSystemPrompt(session.domain);
-  let   iterationCount  = 0;
+  const systemPrompt   = getSystemPrompt(session.domain);
+  let   iterationCount = 0;
+  console.error('[pipeline] Starting loop for', from, 'domain:', session.domain, 'model:', process.env.CLAUDE_MODEL || 'claude-sonnet-4-6');
+
   while (iterationCount < MAX_LOOP_ITERATIONS) {
     iterationCount++;
 
+    const apiMessages = session.messages.map(({ role, content }) => ({ role, content }));
+    console.error('[pipeline] Calling Claude, iteration', iterationCount, 'messages:', apiMessages.length);
     const response = await anthropic.messages.create({
       model:      process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
       system:     systemPrompt,
-      messages:   session.messages,
+      messages:   apiMessages,
       tools:      claudeTools,
       max_tokens: 1024,
     });
+    console.error('[pipeline] Claude responded, stop_reason:', response.stop_reason, 'blocks:', response.content.length);
 
-    session.messages.push({ role: 'assistant', content: response.content });
+    session.messages.push({ role: 'assistant', content: response.content, ts: Date.now() });
 
     if (response.stop_reason === 'end_turn' || response.stop_reason === 'max_tokens') {
       const text = response.content
@@ -128,8 +143,9 @@ async function processMessage(from, messageBody, messageId) {
         .map((b) => b.text)
         .join('\n')
         .trim();
-
+      console.error('[pipeline] Sending text reply, length:', text.length);
       if (text) await sendTextMessage(from, text);
+      console.error('[pipeline] Done for', from);
       break;
     }
 
@@ -139,15 +155,9 @@ async function processMessage(from, messageBody, messageId) {
       const results = await Promise.all(
         toolUseBlocks.map(async (block) => {
           try {
-            const result = await executeTool(block.name, block.input);
-
-            if (block.name === 'qualify_lead' && block.input.service) {
-              session.domain = block.input.service;
-            }
-            if (block.name === 'escalate_to_human') {
-              session.escalated = true;
-            }
-
+            const result = await executeTool(block.name, { ...block.input, _customerPhone: from });
+            if (block.name === 'qualify_lead' && block.input.service) session.domain = block.input.service;
+            if (block.name === 'escalate_to_human') session.escalated = true;
             return { id: block.id, result: String(result) };
           } catch (err) {
             console.error(`[pipeline] Tool error (${block.name}):`, err.message);
@@ -164,7 +174,6 @@ async function processMessage(from, messageBody, messageId) {
           content:     result,
         })),
       });
-
       continue;
     }
 
@@ -183,4 +192,33 @@ async function processMessage(from, messageBody, messageId) {
   saveSessions(sessions);
 }
 
-module.exports = { processMessage };
+// ── Admin controls ────────────────────────────────────────────────────────────
+
+function pauseSession(phone) {
+  const s = sessions.get(phone);
+  if (!s) return;
+  s.humanTakeover = true;
+  sessions.set(phone, s);
+  saveSessions(sessions);
+}
+
+function resumeSession(phone) {
+  const s = sessions.get(phone);
+  if (!s) return;
+  s.humanTakeover = false;
+  sessions.set(phone, s);
+  saveSessions(sessions);
+}
+
+function appendAdminMessage(phone, text) {
+  let s = sessions.get(phone);
+  if (!s) {
+    s = { domain: null, messages: [], lastSeen: Date.now(), escalated: false, humanTakeover: true };
+  }
+  s.messages.push({ role: 'assistant', content: [{ type: 'text', text }], source: 'human', ts: Date.now() });
+  s.lastSeen = Date.now();
+  sessions.set(phone, s);
+  saveSessions(sessions);
+}
+
+module.exports = { processMessage, pauseSession, resumeSession, appendAdminMessage };

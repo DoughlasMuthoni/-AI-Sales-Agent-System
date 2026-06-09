@@ -1,7 +1,25 @@
+const fs   = require('fs');
+const path = require('path');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const { toolDefinitions } = require('./tools.js');
 const { sendLeadNotification, sendCallbackNotification, sendEscalationNotification } = require('../services/email.js');
+const { sendCatalogMessage, sendProductMessage, sendProductListMessage } = require('../services/whatsapp.js');
+
+const DATA_DIR = path.join(__dirname, '../../data');
+
+function persistRecord(filename, record) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const filepath = path.join(DATA_DIR, filename);
+    let list = [];
+    try { list = JSON.parse(fs.readFileSync(filepath, 'utf8')); } catch (e) { /* first write */ }
+    list.push(record);
+    fs.writeFileSync(filepath, JSON.stringify(list, null, 2));
+  } catch (err) {
+    console.error(`[mcpServer] Failed to persist ${filename}:`, err.message);
+  }
+}
 
 // Pricing in Kenyan Shillings (KShs) — indicative ranges only
 const SOLAR_RATES = {
@@ -29,10 +47,6 @@ const BOREHOLE_RATES = {
   rehabilitation: { min: 40000, max: 120000 },
   defaultDepth: { residential: 80, commercial: 100, agricultural: 90 },
 };
-
-const leads = [];
-const callbacks = [];
-const escalations = [];
 
 function getSolarQuote(system_size_kw, location, property_type, system_type) {
   const kw = system_size_kw || 5;
@@ -104,7 +118,7 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
 const toolHandlers = {
   async qualify_lead(input) {
     const lead = { ...input, capturedAt: new Date().toISOString() };
-    leads.push(lead);
+    persistRecord('leads.json', lead);
     console.log('[MCP] Lead qualified:', JSON.stringify(lead));
     sendLeadNotification(lead);
     return `Lead captured for ${input.name} (${input.location}) — ${input.service} / ${input.property_type}. Our team will follow up at ${input.phone}.`;
@@ -112,7 +126,7 @@ const toolHandlers = {
 
   async schedule_callback(input) {
     const booking = { ...input, bookedAt: new Date().toISOString() };
-    callbacks.push(booking);
+    persistRecord('callbacks.json', booking);
     console.log('[MCP] Callback scheduled:', JSON.stringify(booking));
     sendCallbackNotification(booking);
     return `Callback confirmed for ${input.name} on ${input.preferred_date} at ${input.preferred_time}. Our consultant will call ${input.phone}. ${input.notes ? 'Notes: ' + input.notes : ''}`;
@@ -125,9 +139,50 @@ const toolHandlers = {
     return 'Unable to generate a quote — please contact us at +254 768 117 070 or support@waterliftsolar.africa';
   },
 
+  async show_products(input) {
+    const { type, product_ids, section_title, body_text, _customerPhone } = input;
+
+    if (!_customerPhone) {
+      return 'Unable to send catalog — customer phone number not available.';
+    }
+    if (!process.env.WHATSAPP_CATALOG_ID && type !== 'catalog') {
+      return 'WHATSAPP_CATALOG_ID is not set in .env — cannot send product cards. Please add your Catalog ID.';
+    }
+
+    try {
+      if (type === 'catalog') {
+        await sendCatalogMessage(_customerPhone, body_text);
+        return 'Product catalog sent to customer. They can now browse all Waterlift products directly inside WhatsApp.';
+      }
+
+      if (type === 'single') {
+        const id = product_ids && product_ids[0];
+        if (!id) return 'No product ID provided. Please specify a product_id to send a single product card.';
+        await sendProductMessage(_customerPhone, id, body_text);
+        return 'Product card sent to customer.';
+      }
+
+      if (type === 'list') {
+        if (!product_ids || product_ids.length === 0) {
+          return 'No product IDs provided. Please specify product_ids for the list.';
+        }
+        if (product_ids.length > 30) {
+          return 'Too many products — WhatsApp supports a maximum of 30 products per list.';
+        }
+        await sendProductListMessage(_customerPhone, product_ids, section_title, body_text);
+        return `Product list sent with ${product_ids.length} items under "${section_title || 'Products'}".`;
+      }
+
+      return 'Unknown product display type. Use: catalog, single, or list.';
+    } catch (err) {
+      console.error('[MCP] show_products error:', err.message);
+      return `Unable to send interactive catalog at this time. Tell the customer: "You can browse our full product range at waterliftsolar.africa/shop — or let me know what you are looking for and I will share the details and pricing directly."`;
+    }
+  },
+
   async escalate_to_human(input) {
     const record = { ...input, escalatedAt: new Date().toISOString() };
-    escalations.push(record);
+    persistRecord('escalations.json', record);
     console.warn('[MCP] ESCALATION:', JSON.stringify(record));
     sendEscalationNotification(record);
     const urgencyMsg = input.urgency === 'high'

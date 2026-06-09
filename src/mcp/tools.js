@@ -85,6 +85,35 @@ const toolDefinitions = [
     },
   },
   {
+    name: 'show_products',
+    description:
+      'Send interactive product messages from the Waterlift catalog directly inside WhatsApp. Use when a customer asks to see products, packages, pricing options, or what is available. Prefer type "catalog" for general browsing, "list" for a curated selection, and "single" for one specific product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['catalog', 'single', 'list'],
+          description: 'catalog: opens the full catalog browser in WhatsApp. single: shows one product card. list: shows multiple product cards in one message.',
+        },
+        product_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Product retailer IDs from the Meta catalog. Required for single and list types. Leave empty for catalog type.',
+        },
+        section_title: {
+          type: 'string',
+          description: 'Section heading shown above the product list. Used for list type only (e.g. "Solar Backup Systems", "Borehole Pumps").',
+        },
+        body_text: {
+          type: 'string',
+          description: 'Short message to accompany the product display (e.g. "Here are our most popular solar packages").',
+        },
+      },
+      required: ['type'],
+    },
+  },
+  {
     name: 'escalate_to_human',
     description:
       'Flag this conversation for immediate human agent takeover. Use for complaints, legal questions, negotiated pricing, large commercial projects, or any situation beyond standard sales consultation.',
