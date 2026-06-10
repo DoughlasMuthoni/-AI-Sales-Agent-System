@@ -48,13 +48,22 @@ const sessions = loadSessions();
 
 const SOLAR_KEYWORDS    = ['solar', 'panel', 'panels', 'inverter', 'battery', 'electricity',
                            'energy', 'grid', 'power', 'watt', 'kilowatt', 'kw', 'photovoltaic',
-                           'pv', 'load', 'geyser', 'backup', 'lights', 'appliance'];
-const BOREHOLE_KEYWORDS = ['borehole', 'water', 'drilling', 'drill', 'pump', 'well', 'aquifer',
-                           'groundwater', 'irrigation', 'tank', 'jojo', 'municipal', 'bore',
-                           'waterless', 'harvest', 'supply'];
+                           'pv', 'load', 'geyser', 'backup', 'lights', 'appliance',
+                           'heat', 'heating', 'floodlight', 'charge controller', 'inverter'];
+const BOREHOLE_KEYWORDS = ['borehole', 'drilling', 'drill', 'well', 'aquifer',
+                           'groundwater', 'irrigation', 'jojo', 'municipal', 'bore',
+                           'waterless', 'harvest', 'casing', 'submersible'];
+
+// Phrases that unambiguously belong to one domain regardless of keyword scores
+const SOLAR_PHRASES    = ['heat pump', 'hot water', 'water heater', 'solar water', 'solar pump',
+                          'solar panel', 'solar system', 'solar light', 'solar flood', 'backup power'];
+const BOREHOLE_PHRASES = ['borehole', 'drill a', 'water supply', 'ground water', 'water pump',
+                          'pump water', 'water tank', 'water well'];
 
 function detectDomain(text) {
-  const lower         = text.toLowerCase();
+  const lower = text.toLowerCase();
+  if (SOLAR_PHRASES.some(p => lower.includes(p)))    return 'solar';
+  if (BOREHOLE_PHRASES.some(p => lower.includes(p))) return 'borehole';
   const solarScore    = SOLAR_KEYWORDS.filter((kw) => lower.includes(kw)).length;
   const boreholeScore = BOREHOLE_KEYWORDS.filter((kw) => lower.includes(kw)).length;
   if (solarScore > boreholeScore) return 'solar';
@@ -81,6 +90,43 @@ function getSystemPrompt(domain) {
   return GENERAL_PROMPT;
 }
 
+// ── Session seed ─────────────────────────────────────────────────────────────
+
+function seedMessages() {
+  const dateStr = new Date().toLocaleDateString('en-KE', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
+  const ts = Date.now();
+  return [
+    {
+      role: 'user',
+      content: `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
+      source: 'system', ts,
+    },
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Understood.' }],
+      source: 'system', ts,
+    },
+  ];
+}
+
+// ── History trimming ──────────────────────────────────────────────────────────
+
+function buildApiMessages(messages, limit = 20) {
+  const slice = messages.length > limit ? messages.slice(-limit) : messages;
+  let start = 0;
+  while (start < slice.length) {
+    const m = slice[start];
+    if (m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result') {
+      start++;
+    } else {
+      break;
+    }
+  }
+  return slice.slice(start).map(({ role, content }) => ({ role, content }));
+}
+
 // ── Core pipeline ─────────────────────────────────────────────────────────────
 
 const claudeTools = toolDefinitions.map((t) => ({
@@ -94,7 +140,7 @@ async function processMessage(from, messageBody, messageId) {
 
   let session = sessions.get(from);
   if (!session || now - session.lastSeen > SESSION_TTL_MS) {
-    session = { domain: null, messages: [], lastSeen: now, escalated: false, humanTakeover: false };
+    session = { domain: null, messages: seedMessages(), lastSeen: now, escalated: false, humanTakeover: false };
   }
 
   // Human has taken over — record the customer message but don't respond with AI
@@ -124,11 +170,11 @@ async function processMessage(from, messageBody, messageId) {
   while (iterationCount < MAX_LOOP_ITERATIONS) {
     iterationCount++;
 
-    const apiMessages = session.messages.map(({ role, content }) => ({ role, content }));
+    const apiMessages = buildApiMessages(session.messages);
     console.error('[pipeline] Calling Claude, iteration', iterationCount, 'messages:', apiMessages.length);
-    const response = await anthropic.messages.create({
+    const response = await anthropic.beta.promptCaching.messages.create({
       model:      process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-      system:     systemPrompt,
+      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages:   apiMessages,
       tools:      claudeTools,
       max_tokens: 1024,
