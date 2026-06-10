@@ -1,12 +1,10 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
-const fs      = require('fs');
-const path    = require('path');
 const express = require('express');
 const { processMessage, pauseSession, resumeSession, appendAdminMessage } = require('./src/agent/pipeline.js');
 const { sendTextMessage } = require('./src/services/whatsapp.js');
+const db = require('./src/services/db.js');
 
-const DATA_DIR = path.join(__dirname, 'data');
-const app      = express();
+const app = express();
 app.use(express.json());
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -43,11 +41,6 @@ function requireAdminAuth(req, res) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function readJSON(filename, fallback) {
-  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, filename), 'utf8')); }
-  catch (e) { return fallback; }
-}
 
 function esc(s) {
   return String(s || '')
@@ -196,35 +189,45 @@ function buildAdminPage(sessions, leads, callbacks, escalations) {
     ? '<div class="tbl-empty"><div>' + emptyIcon + '</div><p>' + emptyText + '</p></div>'
     : '<div class="tbl-wrap"><table><thead><tr>' + cols.map(c=>'<th>'+c+'</th>').join('') + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 
+  function statusDropdown(index, current) {
+    const opts = ['new','contacted','converted','lost'];
+    return '<select class="status-sel status-' + current + '" data-index="' + index + '" onchange="updateLeadStatus(this)">' +
+      opts.map(s => '<option value="' + s + '"' + (s === current ? ' selected' : '') + '>' + s.charAt(0).toUpperCase() + s.slice(1) + '</option>').join('') +
+      '</select>';
+  }
+
   const leadsHTML = tbl(
-    ['Name','Phone','Service','Location','Property','Budget','Captured'],
-    leads.slice().reverse().map(l =>
-      '<tr><td><strong>' + esc(l.name) + '</strong></td>' +
-      '<td class="mono">' + esc(l.phone) + '</td>' +
-      '<td><span class="chip chip-' + esc(l.service) + '">' + esc(l.service) + '</span></td>' +
-      '<td>' + esc(l.location) + '</td><td>' + esc(l.property_type) + '</td>' +
-      '<td>' + esc(l.estimated_budget||'—') + '</td>' +
-      '<td class="muted">' + fmtFull(l.capturedAt) + '</td></tr>'
-    ).join(''), '&#127919;', 'No leads captured yet.');
+    ['Status','Name','Phone','Service','Location','Property','Budget','Captured'],
+    leads.map(l => {
+      const status = l.status || 'new';
+      return '<tr>' +
+        '<td>' + statusDropdown(l.id, status) + '</td>' +
+        '<td><strong>' + esc(l.name) + '</strong></td>' +
+        '<td class="mono">' + esc(l.phone) + '</td>' +
+        '<td><span class="chip chip-' + esc(l.service) + '">' + esc(l.service) + '</span></td>' +
+        '<td>' + esc(l.location) + '</td><td>' + esc(l.property_type) + '</td>' +
+        '<td>' + esc(l.estimated_budget||'—') + '</td>' +
+        '<td class="muted">' + fmtFull(l.captured_at) + '</td></tr>';
+    }).join(''), '&#127919;', 'No leads captured yet.');
 
   const cbHTML = tbl(
     ['Name','Phone','Date','Time','Notes','Booked At'],
-    callbacks.slice().reverse().map(c =>
+    callbacks.map(c =>
       '<tr><td><strong>' + esc(c.name) + '</strong></td>' +
       '<td class="mono">' + esc(c.phone) + '</td>' +
       '<td>' + esc(c.preferred_date) + '</td><td>' + esc(c.preferred_time) + '</td>' +
       '<td>' + esc(c.notes||'—') + '</td>' +
-      '<td class="muted">' + fmtFull(c.bookedAt) + '</td></tr>'
+      '<td class="muted">' + fmtFull(c.booked_at) + '</td></tr>'
     ).join(''), '&#128197;', 'No callbacks booked yet.');
 
   const urgCls = u => u==='high'?'danger':u==='medium'?'warning':'general';
   const escTbl = tbl(
     ['Customer','Urgency','Reason','Time'],
-    escalations.slice().reverse().map(e =>
+    escalations.map(e =>
       '<tr><td><strong>' + esc(e.customer_name||'Unknown') + '</strong></td>' +
       '<td><span class="chip chip-' + urgCls(e.urgency) + '">' + esc(e.urgency) + '</span></td>' +
       '<td>' + esc(e.reason) + '</td>' +
-      '<td class="muted">' + fmtFull(e.escalatedAt) + '</td></tr>'
+      '<td class="muted">' + fmtFull(e.escalated_at) + '</td></tr>'
     ).join(''), '&#128680;', 'No escalations yet.');
 
   return `<!DOCTYPE html>
@@ -392,6 +395,11 @@ tr:hover td{background:#fafbfd}
 .chip-general{background:#f1f5f9;color:#475569}
 .chip-danger{background:#fee2e2;color:#991b1b}
 .chip-warning{background:#fef3c7;color:#92400e}
+.status-sel{border:none;border-radius:12px;padding:3px 10px;font-size:.72rem;font-weight:700;cursor:pointer;outline:none;-webkit-appearance:none;appearance:none}
+.status-new{background:#dbeafe;color:#1e40af}
+.status-contacted{background:#fef3c7;color:#92400e}
+.status-converted{background:#dcfce7;color:#166534}
+.status-lost{background:#fee2e2;color:#991b1b}
 .tbl-empty{text-align:center;padding:48px 24px;color:#94a3b8;background:#fff;border-radius:10px}
 .tbl-empty div{font-size:2.5rem;margin-bottom:10px}
 .tbl-empty p{font-size:.9rem}
@@ -615,6 +623,21 @@ async function handleSend(phone, pid) {
   finally { btn.disabled = false; btn.innerHTML = '&#10148;'; }
 }
 
+async function updateLeadStatus(sel) {
+  var index  = sel.dataset.index;
+  var status = sel.value;
+  try {
+    var r = await fetch('/admin/api/leads/' + index + '/status', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ status: status })
+    });
+    if (!r.ok) throw new Error('Failed');
+    sel.className = 'status-sel status-' + status;
+    toast('Status updated to ' + status, 'ok');
+  } catch(e) { toast('Update failed: ' + e.message, 'err'); }
+}
+
 // Auto-open first chat on desktop if available
 window.addEventListener('DOMContentLoaded', function() {
   if (window.innerWidth > 768) {
@@ -631,25 +654,30 @@ setTimeout(function(){ location.reload(); }, 60000);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 
-app.get('/admin', (req, res) => {
+app.get('/admin', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  const sessions    = readJSON('sessions.json', {});
-  const leads       = readJSON('leads.json', []);
-  const callbacks   = readJSON('callbacks.json', []);
-  const escalations = readJSON('escalations.json', []);
-  res.send(buildAdminPage(sessions, leads, callbacks, escalations));
+  try {
+    const sessions    = await db.getAllSessionsWithMessages();
+    const leads       = await db.getAllLeads();
+    const callbacks   = await db.getAllCallbacks();
+    const escalations = await db.getAllEscalations();
+    res.send(buildAdminPage(sessions, leads, callbacks, escalations));
+  } catch (err) {
+    console.error('[admin] DB error:', err.message);
+    res.status(500).send('Database error: ' + esc(err.message));
+  }
 });
 
-app.post('/admin/api/session/:phone/pause', (req, res) => {
+app.post('/admin/api/session/:phone/pause', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  pauseSession(req.params.phone);
-  res.json({ ok: true });
+  try { await pauseSession(req.params.phone); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/admin/api/session/:phone/resume', (req, res) => {
+app.post('/admin/api/session/:phone/resume', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  resumeSession(req.params.phone);
-  res.json({ ok: true });
+  try { await resumeSession(req.params.phone); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/admin/api/session/:phone/send', async (req, res) => {
@@ -658,10 +686,24 @@ app.post('/admin/api/session/:phone/send', async (req, res) => {
   if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
   try {
     await sendTextMessage(req.params.phone, message.trim());
-    appendAdminMessage(req.params.phone, message.trim());
+    await appendAdminMessage(req.params.phone, message.trim());
     res.json({ ok: true });
   } catch (err) {
     console.error('[admin] Send error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/admin/api/leads/:index/status', async (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  const { status } = req.body || {};
+  const valid = ['new', 'contacted', 'converted', 'lost'];
+  if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  try {
+    await db.updateLeadStatus(Number(req.params.index), status);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin] updateLeadStatus error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

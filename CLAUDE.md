@@ -59,6 +59,29 @@ Build a `/admin` page served by the Express app that reads from `data/sessions.j
 ### 4. Meta Business Verification
 Complete full business verification on Meta Business Manager to unlock higher messaging tier limits (currently limited to low volume unverified tier).
 
+### 5. SaaS Multi-Tenant Architecture
+Convert this single-tenant agent into a multi-tenant SaaS platform where multiple businesses can each run their own AI sales agent on their own WhatsApp number.
+
+**Architecture changes required:**
+- **Multi-tenant data model** — replace flat JSON files with a database (PostgreSQL recommended). Each tenant has isolated sessions, leads, callbacks, and escalations.
+- **Per-tenant configuration** — store WhatsApp credentials (phone number ID, access token, verify token), system prompts, and product catalog per tenant in DB instead of `.env`.
+- **Webhook routing** — single `/webhook` endpoint dispatches to the correct tenant by matching the `verify_token` or phone number ID from Meta's payload.
+- **Tenant onboarding UI** — web form where a new client enters their WhatsApp credentials, describes their business/services, and pastes their product catalog. Generates their system prompt automatically.
+- **Per-tenant admin dashboard** — each client logs in to see only their own conversations, leads, and callbacks. Add auth (Clerk or Auth.js).
+- **Billing** — Stripe integration, charge per active WhatsApp number per month.
+- **Hosting** — migrate off cPanel/LiteSpeed to Railway, Render, or VPS to eliminate the LSAPI async timeout issue that affects multi-iteration Claude calls.
+
+**WhatsApp constraint (critical):**
+Each tenant must bring their own WhatsApp Business Account and phone number — one number cannot be shared across clients. Two paths:
+- **Path A (start here):** Clients connect their own WABA credentials during onboarding.
+- **Path B (future):** Apply to become a Meta WhatsApp Business Solution Provider (BSP) to provision numbers directly — requires Meta approval and significant compliance overhead.
+
+**Target market:** High-ticket service businesses in Kenya/Africa with WhatsApp presence — solar companies, borehole drillers, real estate agents, insurance brokers, car dealers.
+
+**Recommended pricing:** KShs 5,000–20,000/month per WhatsApp number depending on message volume and features.
+
+**Current status:** Single-tenant only. SaaS architecture is a future roadmap item — implement after Meta Business Verification is complete and the current system is stable in production.
+
 ---
 
 ## Target Directory Structure

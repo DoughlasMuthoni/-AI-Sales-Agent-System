@@ -1,25 +1,9 @@
-const fs   = require('fs');
-const path = require('path');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const { toolDefinitions } = require('./tools.js');
 const { sendLeadNotification, sendCallbackNotification, sendEscalationNotification } = require('../services/email.js');
-const { sendCatalogMessage, sendProductMessage, sendProductListMessage } = require('../services/whatsapp.js');
-
-const DATA_DIR = path.join(__dirname, '../../data');
-
-function persistRecord(filename, record) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const filepath = path.join(DATA_DIR, filename);
-    let list = [];
-    try { list = JSON.parse(fs.readFileSync(filepath, 'utf8')); } catch (e) { /* first write */ }
-    list.push(record);
-    fs.writeFileSync(filepath, JSON.stringify(list, null, 2));
-  } catch (err) {
-    console.error(`[mcpServer] Failed to persist ${filename}:`, err.message);
-  }
-}
+const { sendTextMessage, sendCatalogMessage, sendProductMessage, sendProductListMessage } = require('../services/whatsapp.js');
+const db = require('../services/db.js');
 
 // Pricing in Kenyan Shillings (KShs) — indicative ranges only
 const SOLAR_RATES = {
@@ -117,17 +101,17 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
 
 const toolHandlers = {
   async qualify_lead(input) {
-    const lead = { ...input, capturedAt: new Date().toISOString() };
-    persistRecord('leads.json', lead);
-    console.log('[MCP] Lead qualified:', JSON.stringify(lead));
+    const lead = { ...input, status: 'new', capturedAt: new Date().toISOString() };
+    await db.insertLead(lead);
+    console.error('[MCP] Lead qualified:', input.name, input.phone);
     sendLeadNotification(lead);
     return `Lead captured for ${input.name} (${input.location}) — ${input.service} / ${input.property_type}. Our team will follow up at ${input.phone}.`;
   },
 
   async schedule_callback(input) {
     const booking = { ...input, bookedAt: new Date().toISOString() };
-    persistRecord('callbacks.json', booking);
-    console.log('[MCP] Callback scheduled:', JSON.stringify(booking));
+    await db.insertCallback(booking);
+    console.error('[MCP] Callback scheduled:', input.name, input.preferred_date);
     sendCallbackNotification(booking);
     return `Callback confirmed for ${input.name} on ${input.preferred_date} at ${input.preferred_time}. Our consultant will call ${input.phone}. ${input.notes ? 'Notes: ' + input.notes : ''}`;
   },
@@ -176,14 +160,20 @@ const toolHandlers = {
       return 'Unknown product display type. Use: catalog, single, or list.';
     } catch (err) {
       console.error('[MCP] show_products error:', err.message);
-      return `Unable to send interactive catalog at this time. Tell the customer: "You can browse our full product range at waterliftsolar.africa/shop — or let me know what you are looking for and I will share the details and pricing directly."`;
+      if (_customerPhone) {
+        try {
+          await sendTextMessage(_customerPhone,
+            'You can browse our full product range at waterliftsolar.africa/shop — or tell me what you are looking for and I will share the details and pricing directly.');
+        } catch (e) { console.error('[MCP] Fallback text failed:', e.message); }
+      }
+      return 'SENT_DIRECTLY: catalog unavailable, customer sent website link.';
     }
   },
 
   async escalate_to_human(input) {
     const record = { ...input, escalatedAt: new Date().toISOString() };
-    persistRecord('escalations.json', record);
-    console.warn('[MCP] ESCALATION:', JSON.stringify(record));
+    await db.insertEscalation(record);
+    console.error('[MCP] ESCALATION:', input.customer_name, input.urgency);
     sendEscalationNotification(record);
     const urgencyMsg = input.urgency === 'high'
       ? 'A team member will contact you as soon as possible.'
