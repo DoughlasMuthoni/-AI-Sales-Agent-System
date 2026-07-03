@@ -59,3 +59,15 @@ CREATE TABLE IF NOT EXISTS escalations (
   escalated_at  DATETIME     NOT NULL,
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Browser push subscriptions for the admin dashboard (one row per installed device)
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  endpoint      TEXT         NOT NULL,
+  endpoint_hash CHAR(64)     NOT NULL,
+  p256dh        VARCHAR(255) NOT NULL,
+  auth          VARCHAR(255) NOT NULL,
+  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uniq_endpoint_hash (endpoint_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

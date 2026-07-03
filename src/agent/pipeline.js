@@ -11,6 +11,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const SESSION_TTL_MS      = 24 * 60 * 60 * 1000;
 const MAX_LOOP_ITERATIONS = 10;
 
+const processing = new Set(); // phones currently mid-pipeline
+
 // ── Domain detection ──────────────────────────────────────────────────────────
 
 const SOLAR_KEYWORDS    = ['solar', 'panel', 'panels', 'inverter', 'battery', 'electricity',
@@ -49,6 +51,8 @@ Greet the customer warmly and ask which service they are interested in:
 Once they indicate their interest, proceed as a specialist in that domain.
 Contact: +254 768 117 070 | support@waterliftsolar.africa
 
+Customers may also send photos (electricity meter, appliance nameplate, site photos, existing borehole/pump equipment, etc.) — examine them carefully and use what you see to help identify their service interest.
+
 Never use markdown headers or emojis. Keep responses short and conversational.`;
 
 function getSystemPrompt(domain) {
@@ -65,7 +69,33 @@ const claudeTools = toolDefinitions.map(t => ({
   input_schema: t.inputSchema,
 }));
 
-async function processMessage(from, messageBody, messageId) {
+async function processMessage(from, messageBody, messageId, referral = null) {
+  if (processing.has(from)) {
+    console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
+    return;
+  }
+  processing.add(from);
+  try {
+    await _processMessage(from, messageBody, messageId, referral);
+  } finally {
+    processing.delete(from);
+  }
+}
+
+async function processImageMessage(from, media, caption, messageId) {
+  if (processing.has(from)) {
+    console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
+    return;
+  }
+  processing.add(from);
+  try {
+    await _processImageMessage(from, media, caption, messageId);
+  } finally {
+    processing.delete(from);
+  }
+}
+
+async function _processMessage(from, messageBody, messageId, referral = null) {
   const now = Date.now();
 
   let session = await db.getSession(from);
@@ -97,14 +127,95 @@ async function processMessage(from, messageBody, messageId) {
   const detected = detectDomain(messageBody);
   if (detected) session.domain = detected;
 
+  // If the message is generic but the customer came from a Click-to-WhatsApp ad,
+  // use the ad headline/body to detect domain and inject product context for Claude
+  if (referral) {
+    const adText = [referral.headline, referral.body].filter(Boolean).join(' ');
+    if (!session.domain && adText) {
+      const adDomain = detectDomain(adText);
+      if (adDomain) session.domain = adDomain;
+    }
+    const productNote = referral.product?.product_id
+      ? `product ID ${referral.product.product_id} from catalog ${referral.product.catalog_id || process.env.WHATSAPP_CATALOG_ID}`
+      : null;
+    const adCtx = [
+      referral.headline && `Ad: "${referral.headline}"`,
+      referral.body     && `Description: "${referral.body}"`,
+      productNote       && `Product: ${productNote}`,
+    ].filter(Boolean).join('. ');
+    if (adCtx) {
+      console.error('[pipeline] Injecting ad referral context:', adCtx);
+      await db.addMessage(from, 'user',
+        `[Context — not from customer] This customer tapped a WhatsApp ad before messaging. ${adCtx}. Use this to understand their specific interest and address it directly. Do not mention this metadata to the customer.`,
+        'system', now);
+      await db.addMessage(from, 'assistant',
+        [{ type: 'text', text: 'Understood.' }],
+        'system', now);
+    }
+  }
+
   session.lastSeen = now;
   await db.addMessage(from, 'user', messageBody, null, now);
   await db.upsertSession(from, session);
 
   await sendTypingIndicator(from, messageId);
 
-  const systemPrompt   = getSystemPrompt(session.domain);
-  let   iterationCount = 0;
+  const systemPrompt = getSystemPrompt(session.domain);
+  await runAgenticLoop(from, session, systemPrompt);
+}
+
+// Customer sent an image (with an optional caption) — analyzed via Claude's vision input
+async function _processImageMessage(from, media, caption, messageId) {
+  const now = Date.now();
+
+  let session = await db.getSession(from);
+
+  if (!session || now - session.lastSeen > SESSION_TTL_MS) {
+    session = { domain: null, lastSeen: now, escalated: false, humanTakeover: false };
+    await db.upsertSession(from, session);
+    const dateStr = new Date().toLocaleDateString('en-KE', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+    await db.addMessage(from, 'user',
+      `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
+      'system', now);
+    await db.addMessage(from, 'assistant',
+      [{ type: 'text', text: 'Understood.' }],
+      'system', now);
+  }
+
+  const contentBlocks = [
+    { type: 'image', source: { type: 'base64', media_type: media.mimeType, data: media.base64 } },
+  ];
+  if (caption) contentBlocks.push({ type: 'text', text: caption });
+
+  // Human has taken over — record the customer's image but don't respond with AI
+  if (session.humanTakeover) {
+    session.lastSeen = now;
+    await db.addMessage(from, 'user', contentBlocks, null, now);
+    await db.upsertSession(from, session);
+    return;
+  }
+
+  if (caption) {
+    const detected = detectDomain(caption);
+    if (detected) session.domain = detected;
+  }
+
+  session.lastSeen = now;
+  await db.addMessage(from, 'user', contentBlocks, null, now);
+  await db.upsertSession(from, session);
+
+  await sendTypingIndicator(from, messageId);
+
+  const systemPrompt = getSystemPrompt(session.domain);
+  await runAgenticLoop(from, session, systemPrompt);
+}
+
+// ── Agentic loop (shared by text and image entry points) ─────────────────────
+
+async function runAgenticLoop(from, session, systemPrompt) {
+  let iterationCount = 0;
   console.error('[pipeline] Starting loop for', from, 'domain:', session.domain, 'model:', process.env.CLAUDE_MODEL || 'claude-sonnet-4-6');
 
   while (iterationCount < MAX_LOOP_ITERATIONS) {
@@ -214,4 +325,4 @@ async function appendAdminMessage(phone, text) {
   await db.upsertSession(phone, s);
 }
 
-module.exports = { processMessage, pauseSession, resumeSession, appendAdminMessage };
+module.exports = { processMessage, processImageMessage, pauseSession, resumeSession, appendAdminMessage };

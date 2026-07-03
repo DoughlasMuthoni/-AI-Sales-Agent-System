@@ -63,7 +63,7 @@ Complete full business verification on Meta Business Manager to unlock higher me
 Convert this single-tenant agent into a multi-tenant SaaS platform where multiple businesses can each run their own AI sales agent on their own WhatsApp number.
 
 **Architecture changes required:**
-- **Multi-tenant data model** — replace flat JSON files with a database (PostgreSQL recommended). Each tenant has isolated sessions, leads, callbacks, and escalations.
+- **Multi-tenant data model** — the system already migrated off flat JSON files onto MySQL (see `schema.sql`: `sessions`, `messages`, `leads`, `callbacks`, `escalations`). None of these tables have a `tenant_id` column yet — everything belongs to one implicit tenant. Adding `tenant_id` to each table (and to every query in `src/services/db.js`) is the actual remaining task, not a database migration.
 - **Per-tenant configuration** — store WhatsApp credentials (phone number ID, access token, verify token), system prompts, and product catalog per tenant in DB instead of `.env`.
 - **Webhook routing** — single `/webhook` endpoint dispatches to the correct tenant by matching the `verify_token` or phone number ID from Meta's payload.
 - **Tenant onboarding UI** — web form where a new client enters their WhatsApp credentials, describes their business/services, and pastes their product catalog. Generates their system prompt automatically.
@@ -82,6 +82,16 @@ Each tenant must bring their own WhatsApp Business Account and phone number — 
 
 **Current status:** Single-tenant only. SaaS architecture is a future roadmap item — implement after Meta Business Verification is complete and the current system is stable in production.
 
+**Current codebase assessment (SaaS-readiness):**
+- What's already in good shape: the module split (`src/services/whatsapp.js`, `src/agent/pipeline.js`, `src/agent/prompts.js`, `src/services/db.js`, `src/mcp/`) is clean — most of the *logic* would carry over unchanged, it just needs to be parameterized by tenant rather than rewritten.
+- Concrete blockers found when this was reviewed:
+  1. WhatsApp credentials (`WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`) live in one shared `.env` — only one business/number can exist at a time.
+  2. No `tenant_id` on `sessions` / `messages` / `leads` / `callbacks` / `escalations` — see data-model note above.
+  3. `POST /webhook` in `webhook.js` doesn't dispatch by tenant — it assumes every inbound message belongs to this one client.
+  4. `SOLAR_SYSTEM_PROMPT` / `BOREHOLE_SYSTEM_PROMPT` in `src/agent/prompts.js` are hardcoded strings, including the full product catalog with prices — a new tenant's business description/catalog isn't data-driven yet.
+  5. `/admin` in `webhook.js` uses one global `ADMIN_PASSWORD` and shows every conversation with no per-tenant isolation.
+- Migration path: add a `tenants` table, add `tenant_id` to the other tables, move WhatsApp credentials + system prompt + catalog into per-tenant DB rows, route `/webhook` by matching the incoming `phone_number_id` to a tenant, and give `/admin` per-tenant login + scoped queries.
+
 ---
 
 ## Target Directory Structure
@@ -98,6 +108,14 @@ Claude Code must strictly implement and maintain the following modular folder la
     │   └── tools.js          # Definitions/schemas for tools exposed to Claude
     ├── services/
     │   └── whatsapp.js       # Outbound HTTPS engine executing official Meta Cloud API calls
-    └── agent/
+    └── age
+    
+    
+    
+    
+    
+    
+    
+    nt/
         ├── pipeline.js       # Core orchestration tying Webhook -> Claude API -> MCP Tool
         └── prompts.js        # Strict system prompts for Solar vs Borehole domains

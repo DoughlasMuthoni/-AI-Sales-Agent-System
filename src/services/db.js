@@ -1,5 +1,6 @@
 'use strict';
-const mysql = require('mysql2/promise');
+const mysql  = require('mysql2/promise');
+const crypto = require('crypto');
 
 const pool = mysql.createPool({
   host:               process.env.DB_HOST     || 'localhost',
@@ -102,6 +103,46 @@ async function getAllMessages(phone) {
   }));
 }
 
+// Messages for a phone newer than a timestamp (admin polling)
+async function getMessagesSince(phone, sinceTs) {
+  const [rows] = await pool.query(
+    'SELECT role, content, source, ts FROM messages WHERE phone = ? AND ts > ? ORDER BY ts ASC, id ASC',
+    [phone, Number(sinceTs)]
+  );
+  return rows.map(r => ({
+    role:    r.role,
+    content: parseContent(r.content),
+    source:  r.source,
+    ts:      Number(r.ts),
+  }));
+}
+
+// Lightweight sessions summary for polling (no full message history)
+async function getSessionsSummary() {
+  const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
+  if (!sessions.length) return [];
+  const phones = sessions.map(s => s.phone);
+  const [lastMsgs] = await pool.query(
+    `SELECT m.phone, m.role, m.content, m.source, m.ts
+     FROM messages m
+     INNER JOIN (SELECT phone, MAX(id) as max_id FROM messages WHERE phone IN (${phones.map(() => '?').join(',')}) GROUP BY phone) t
+     ON m.phone = t.phone AND m.id = t.max_id`,
+    phones
+  );
+  const lastMsgMap = {};
+  for (const m of lastMsgs) {
+    lastMsgMap[m.phone] = { role: m.role, content: parseContent(m.content), source: m.source, ts: Number(m.ts) };
+  }
+  return sessions.map(s => ({
+    phone:         s.phone,
+    domain:        s.domain,
+    lastSeen:      Number(s.last_seen),
+    escalated:     !!s.escalated,
+    humanTakeover: !!s.human_takeover,
+    lastMessage:   lastMsgMap[s.phone] || null,
+  }));
+}
+
 // All sessions with their full message history (admin dashboard)
 async function getAllSessionsWithMessages() {
   const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
@@ -190,12 +231,46 @@ async function getAllEscalations() {
   return rows;
 }
 
+async function resolveEscalation(id) {
+  await pool.query(
+    'UPDATE escalations SET resolved = 1, resolved_at = NOW() WHERE id = ?',
+    [id]
+  );
+}
+
+// ── Push subscriptions (admin dashboard notifications) ────────────────────────
+
+function hashEndpoint(endpoint) {
+  return crypto.createHash('sha256').update(endpoint).digest('hex');
+}
+
+async function savePushSubscription(sub) {
+  const endpointHash = hashEndpoint(sub.endpoint);
+  await pool.query(
+    `INSERT INTO push_subscriptions (endpoint, endpoint_hash, p256dh, auth)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE p256dh = VALUES(p256dh), auth = VALUES(auth)`,
+    [sub.endpoint, endpointHash, sub.keys.p256dh, sub.keys.auth]
+  );
+}
+
+async function getAllPushSubscriptions() {
+  const [rows] = await pool.query('SELECT endpoint, p256dh, auth FROM push_subscriptions');
+  return rows.map(r => ({ endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } }));
+}
+
+async function deletePushSubscriptionByEndpoint(endpoint) {
+  await pool.query('DELETE FROM push_subscriptions WHERE endpoint_hash = ?', [hashEndpoint(endpoint)]);
+}
+
 module.exports = {
   getSession,
   upsertSession,
   addMessage,
   getApiMessages,
   getAllMessages,
+  getMessagesSince,
+  getSessionsSummary,
   getAllSessionsWithMessages,
   insertLead,
   updateLeadStatus,
@@ -204,4 +279,8 @@ module.exports = {
   getAllCallbacks,
   insertEscalation,
   getAllEscalations,
+  resolveEscalation,
+  savePushSubscription,
+  getAllPushSubscriptions,
+  deletePushSubscriptionByEndpoint,
 };

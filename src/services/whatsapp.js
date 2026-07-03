@@ -109,4 +109,54 @@ async function sendProductListMessage(to, productRetailerIds, sectionTitle, body
   });
 }
 
-module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage };
+// Downloads a WhatsApp media object (image, etc.) and returns it as base64 for Claude's vision input
+async function downloadMedia(mediaId) {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  const metaRes = await fetch(`${GRAPH_API_BASE}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!metaRes.ok) throw new Error(`WhatsApp media lookup failed: ${metaRes.status}`);
+  const meta = await metaRes.json();
+
+  const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!fileRes.ok) throw new Error(`WhatsApp media download failed: ${fileRes.status}`);
+  const buf = Buffer.from(await fileRes.arrayBuffer());
+
+  return { base64: buf.toString('base64'), mimeType: meta.mime_type, sizeBytes: buf.length };
+}
+
+// In-memory cache for product names — avoids a catalog API call on every order for the same product
+const _productNameCache = new Map();
+
+async function lookupProductNames(retailerIds) {
+  const catalogId   = process.env.WHATSAPP_CATALOG_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!catalogId || !accessToken || !retailerIds.length) return {};
+
+  const names   = {};
+  const toFetch = [];
+
+  for (const id of retailerIds) {
+    if (_productNameCache.has(id)) names[id] = _productNameCache.get(id);
+    else toFetch.push(id);
+  }
+
+  for (const id of toFetch) {
+    try {
+      const filter = encodeURIComponent(JSON.stringify({ retailer_id: { eq: id } }));
+      const url    = `${GRAPH_API_BASE}/${catalogId}/products?filter=${filter}&fields=retailer_id,name&access_token=${accessToken}`;
+      const res    = await fetch(url);
+      if (!res.ok) { console.error('[catalog] API error for', id, res.status); continue; }
+      const data   = await res.json();
+      const name   = data.data?.[0]?.name;
+      if (name) { _productNameCache.set(id, name); names[id] = name; }
+    } catch (err) {
+      console.error('[catalog] Failed to fetch product', id, err.message);
+    }
+  }
+
+  return names;
+}
+
+module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage, lookupProductNames, downloadMedia };
