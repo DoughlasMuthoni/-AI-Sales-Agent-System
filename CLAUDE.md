@@ -116,6 +116,12 @@ Claude Code must strictly implement and maintain the following modular folder la
     
     
     
+
+
+
+    
+
+    
     nt/
         ├── pipeline.js       # Core orchestration tying Webhook -> Claude API -> MCP Tool
         └── prompts.js        # Strict system prompts for Solar vs Borehole domains

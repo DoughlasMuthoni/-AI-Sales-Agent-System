@@ -3,12 +3,33 @@
 -- Upload via phpMyAdmin: select your database → Import → choose this file
 -- ============================================================
 
+-- Dashboard login accounts (hand-rolled auth, no external vendor).
+-- Provisioned via scripts/create-admin-user.js — no public signup route.
+CREATE TABLE IF NOT EXISTS admin_users (
+  id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  email         VARCHAR(255) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uniq_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Session store for express-session (via express-mysql-session). Named distinctly
+-- from the `sessions` table below, which holds WhatsApp conversation state, not logins.
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  session_id VARCHAR(128) NOT NULL,
+  expires    INT UNSIGNED NOT NULL,
+  data       MEDIUMTEXT,
+  PRIMARY KEY (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS sessions (
   phone          VARCHAR(30)  NOT NULL,
   domain         VARCHAR(20)  DEFAULT NULL,
   last_seen      BIGINT       NOT NULL,
   escalated      TINYINT(1)   NOT NULL DEFAULT 0,
   human_takeover TINYINT(1)   NOT NULL DEFAULT 0,
+  ad_referral    TEXT         DEFAULT NULL,
   created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (phone),
   INDEX idx_last_seen (last_seen)
@@ -34,6 +55,7 @@ CREATE TABLE IF NOT EXISTS leads (
   property_type    VARCHAR(100) DEFAULT NULL,
   estimated_budget VARCHAR(100) DEFAULT NULL,
   status           VARCHAR(20)  NOT NULL DEFAULT 'new',
+  notes            TEXT         DEFAULT NULL,
   captured_at      DATETIME     NOT NULL,
   status_updated_at DATETIME    DEFAULT NULL,
   PRIMARY KEY (id),

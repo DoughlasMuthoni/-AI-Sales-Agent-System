@@ -23,6 +23,10 @@ const toolDefinitions = [
           type: 'string',
           description: "Prospect's stated budget range, if mentioned (optional)",
         },
+        notes: {
+          type: 'string',
+          description: 'Any other useful context about the prospect or their request worth passing to the sales team (optional)',
+        },
       },
       required: ['name', 'phone', 'location', 'service', 'property_type'],
     },

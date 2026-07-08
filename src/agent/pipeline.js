@@ -152,6 +152,16 @@ async function _processMessage(from, messageBody, messageId, referral = null) {
         [{ type: 'text', text: 'Understood.' }],
         'system', now);
     }
+    // Keep first-touch attribution — record which ad brought this customer in, for the admin dashboard
+    if (!session.adReferral && (referral.headline || referral.body || productNote)) {
+      session.adReferral = {
+        headline:   referral.headline || null,
+        body:       referral.body || null,
+        productId:  referral.product?.product_id || null,
+        catalogId:  referral.product?.catalog_id || null,
+        capturedAt: now,
+      };
+    }
   }
 
   session.lastSeen = now;
@@ -325,4 +335,15 @@ async function appendAdminMessage(phone, text) {
   await db.upsertSession(phone, s);
 }
 
-module.exports = { processMessage, processImageMessage, pauseSession, resumeSession, appendAdminMessage };
+async function appendAdminDocumentMessage(phone, filename, caption) {
+  let s = await db.getSession(phone);
+  if (!s) {
+    s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
+    await db.upsertSession(phone, s);
+  }
+  await db.addMessage(phone, 'assistant', [{ type: 'document', filename, caption: caption || null }], 'human', Date.now());
+  s.lastSeen = Date.now();
+  await db.upsertSession(phone, s);
+}
+
+module.exports = { processMessage, processImageMessage, pauseSession, resumeSession, appendAdminMessage, appendAdminDocumentMessage };

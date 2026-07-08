@@ -126,6 +126,42 @@ async function downloadMedia(mediaId) {
   return { base64: buf.toString('base64'), mimeType: meta.mime_type, sizeBytes: buf.length };
 }
 
+// Uploads a file (e.g. a quotation PDF) to Meta's Media API so it can be attached to a
+// message. Returns the media ID to pass into sendDocumentMessage.
+async function uploadMedia(buffer, mimeType, filename) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('file', new Blob([buffer], { type: mimeType }), filename);
+
+  const response = await fetch(`${GRAPH_API_BASE}/${phoneNumberId}/media`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(`WhatsApp media upload error ${response.status}: ${JSON.stringify(error?.error ?? error)}`);
+  }
+  const data = await response.json();
+  return data.id;
+}
+
+// Sends a previously-uploaded document (see uploadMedia) to a customer
+async function sendDocumentMessage(to, mediaId, filename, caption) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
+  return post(phoneNumberId, accessToken, {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'document',
+    document: { id: mediaId, filename, ...(caption ? { caption } : {}) },
+  });
+}
+
 // In-memory cache for product names — avoids a catalog API call on every order for the same product
 const _productNameCache = new Map();
 
@@ -159,4 +195,4 @@ async function lookupProductNames(retailerIds) {
   return names;
 }
 
-module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage, lookupProductNames, downloadMedia };
+module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage, lookupProductNames, downloadMedia, uploadMedia, sendDocumentMessage };

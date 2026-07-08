@@ -20,6 +20,25 @@ function serialize(content) {
   return typeof content === 'string' ? content : JSON.stringify(content);
 }
 
+// ── Admin auth ────────────────────────────────────────────────────────────────
+
+async function getAdminUserByEmail(email) {
+  const [rows] = await pool.query(
+    'SELECT id, email, password_hash FROM admin_users WHERE email = ? LIMIT 1',
+    [email]
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, email: rows[0].email, passwordHash: rows[0].password_hash };
+}
+
+async function createAdminUser(email, passwordHash) {
+  const [result] = await pool.query(
+    'INSERT INTO admin_users (email, password_hash) VALUES (?, ?)',
+    [email, passwordHash]
+  );
+  return result.insertId;
+}
+
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 async function getSession(phone) {
@@ -31,24 +50,27 @@ async function getSession(phone) {
     lastSeen:      Number(s.last_seen),
     escalated:     !!s.escalated,
     humanTakeover: !!s.human_takeover,
+    adReferral:    s.ad_referral ? parseContent(s.ad_referral) : null,
   };
 }
 
 async function upsertSession(phone, session) {
   await pool.query(
-    `INSERT INTO sessions (phone, domain, last_seen, escalated, human_takeover)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO sessions (phone, domain, last_seen, escalated, human_takeover, ad_referral)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        domain         = VALUES(domain),
        last_seen      = VALUES(last_seen),
        escalated      = VALUES(escalated),
-       human_takeover = VALUES(human_takeover)`,
+       human_takeover = VALUES(human_takeover),
+       ad_referral    = VALUES(ad_referral)`,
     [
       phone,
       session.domain        || null,
       session.lastSeen,
       session.escalated     ? 1 : 0,
       session.humanTakeover ? 1 : 0,
+      session.adReferral    ? serialize(session.adReferral) : null,
     ]
   );
 }
@@ -85,8 +107,26 @@ async function getApiMessages(phone, limit = 20) {
 
   return rows.slice(start).map(r => ({
     role:    r.role,
-    content: parseContent(r.content),
+    content: sanitizeForClaude(parseContent(r.content)),
   }));
+}
+
+// Claude's Messages API has a reserved native `document` content-block type (for PDF
+// understanding) with its own required schema ({type:'document', source:{...}}) — it
+// is NOT the same thing as the {type:'document', filename, caption} block this app
+// stores when an admin sends a quotation file. Sending our shape under that reserved
+// name makes Claude reject the entire request with a 400. Swap it for a plain text
+// block here (Claude-facing only — the admin dashboard's own rendering reads from
+// getAllMessages/getMessagesSince instead, so its rich document bubble is unaffected).
+function sanitizeForClaude(content) {
+  if (!Array.isArray(content)) return content;
+  return content.map(block => {
+    if (block?.type === 'document' && !block.source) {
+      const label = block.caption ? `${block.filename} — ${block.caption}` : block.filename;
+      return { type: 'text', text: `[Sent document: ${label}]` };
+    }
+    return block;
+  });
 }
 
 // All messages for a phone (admin dashboard — no limit)
@@ -139,6 +179,7 @@ async function getSessionsSummary() {
     lastSeen:      Number(s.last_seen),
     escalated:     !!s.escalated,
     humanTakeover: !!s.human_takeover,
+    adReferral:    s.ad_referral ? parseContent(s.ad_referral) : null,
     lastMessage:   lastMsgMap[s.phone] || null,
   }));
 }
@@ -168,6 +209,7 @@ async function getAllSessionsWithMessages() {
       lastSeen:      Number(s.last_seen),
       escalated:     !!s.escalated,
       humanTakeover: !!s.human_takeover,
+      adReferral:    s.ad_referral ? parseContent(s.ad_referral) : null,
       messages:      msgMap[s.phone] || [],
     };
   }
@@ -178,15 +220,27 @@ async function getAllSessionsWithMessages() {
 
 async function insertLead(lead) {
   const [result] = await pool.query(
-    `INSERT INTO leads (name, phone, location, service, property_type, estimated_budget, status, captured_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'new', ?)`,
+    `INSERT INTO leads (name, phone, location, service, property_type, estimated_budget, notes, status, captured_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
     [
       lead.name, lead.phone, lead.location, lead.service,
-      lead.property_type, lead.estimated_budget || null,
+      lead.property_type, lead.estimated_budget || null, lead.notes || null,
       new Date(lead.capturedAt),
     ]
   );
   return result.insertId;
+}
+
+async function updateLead(id, lead) {
+  await pool.query(
+    `UPDATE leads SET name = ?, phone = ?, location = ?, service = ?, property_type = ?,
+       estimated_budget = ?, notes = ? WHERE id = ?`,
+    [
+      lead.name, lead.phone, lead.location, lead.service,
+      lead.property_type, lead.estimated_budget || null, lead.notes || null,
+      id,
+    ]
+  );
 }
 
 async function updateLeadStatus(id, status) {
@@ -264,6 +318,8 @@ async function deletePushSubscriptionByEndpoint(endpoint) {
 }
 
 module.exports = {
+  getAdminUserByEmail,
+  createAdminUser,
   getSession,
   upsertSession,
   addMessage,
@@ -273,6 +329,7 @@ module.exports = {
   getSessionsSummary,
   getAllSessionsWithMessages,
   insertLead,
+  updateLead,
   updateLeadStatus,
   getAllLeads,
   insertCallback,
