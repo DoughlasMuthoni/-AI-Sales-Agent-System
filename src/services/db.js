@@ -78,10 +78,11 @@ async function upsertSession(phone, session) {
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 async function addMessage(phone, role, content, source = null, ts = null) {
-  await pool.query(
+  const [result] = await pool.query(
     'INSERT INTO messages (phone, role, content, source, ts) VALUES (?, ?, ?, ?, ?)',
     [phone, role, serialize(content), source || null, ts || Date.now()]
   );
+  return result.insertId;
 }
 
 // Last `limit` messages in chronological order, orphaned tool_result trimmed
@@ -117,7 +118,7 @@ async function getApiMessages(phone, limit = 20) {
 // stores when an admin sends a quotation file. Sending our shape under that reserved
 // name makes Claude reject the entire request with a 400. Swap it for a plain text
 // block here (Claude-facing only — the admin dashboard's own rendering reads from
-// getAllMessages/getMessagesSince instead, so its rich document bubble is unaffected).
+// getAllSessionsWithMessages/getMessagesSinceId instead, so its rich document bubble is unaffected).
 function sanitizeForClaude(content) {
   if (!Array.isArray(content)) return content;
   return content.map(block => {
@@ -143,13 +144,16 @@ async function getAllMessages(phone) {
   }));
 }
 
-// Messages for a phone newer than a timestamp (admin polling)
-async function getMessagesSince(phone, sinceTs) {
+// Messages for a phone newer than a given message id (admin polling). Cursoring by
+// id rather than ts avoids client/server clock-skew and optimistic-append-vs-poll
+// race conditions that caused duplicate/missing messages in the live chat view.
+async function getMessagesSinceId(phone, sinceId) {
   const [rows] = await pool.query(
-    'SELECT role, content, source, ts FROM messages WHERE phone = ? AND ts > ? ORDER BY ts ASC, id ASC',
-    [phone, Number(sinceTs)]
+    'SELECT id, role, content, source, ts FROM messages WHERE phone = ? AND id > ? ORDER BY id ASC',
+    [phone, Number(sinceId)]
   );
   return rows.map(r => ({
+    id:      r.id,
     role:    r.role,
     content: parseContent(r.content),
     source:  r.source,
@@ -188,13 +192,14 @@ async function getSessionsSummary() {
 async function getAllSessionsWithMessages() {
   const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
   const [messages] = await pool.query(
-    'SELECT phone, role, content, source, ts FROM messages ORDER BY ts ASC, id ASC'
+    'SELECT id, phone, role, content, source, ts FROM messages ORDER BY ts ASC, id ASC'
   );
 
   const msgMap = {};
   for (const m of messages) {
     if (!msgMap[m.phone]) msgMap[m.phone] = [];
     msgMap[m.phone].push({
+      id:      m.id,
       role:    m.role,
       content: parseContent(m.content),
       source:  m.source,
@@ -325,7 +330,7 @@ module.exports = {
   addMessage,
   getApiMessages,
   getAllMessages,
-  getMessagesSince,
+  getMessagesSinceId,
   getSessionsSummary,
   getAllSessionsWithMessages,
   insertLead,

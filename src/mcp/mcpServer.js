@@ -160,13 +160,21 @@ const toolHandlers = {
       return 'Unknown product display type. Use: catalog, single, or list.';
     } catch (err) {
       console.error('[MCP] show_products error:', err.message);
-      if (_customerPhone) {
+      // "catalog" (browse-everything) has no specific product to fall back to describing,
+      // so keep sending the website link directly for that case.
+      if (type === 'catalog') {
         try {
           await sendTextMessage(_customerPhone,
             'You can browse our full product range at waterliftsolar.africa/shop — or tell me what you are looking for and I will share the details and pricing directly.');
         } catch (e) { console.error('[MCP] Fallback text failed:', e.message); }
+        return 'SENT_DIRECTLY: catalog unavailable, customer sent website link.';
       }
-      return 'SENT_DIRECTLY: catalog unavailable, customer sent website link.';
+      // "single"/"list" failures are usually one product not yet enabled for WhatsApp
+      // even though it exists in the catalog (Meta returns 400 "not found" for it).
+      // Claude already has this product's name/price/specs in its system prompt, so
+      // let it compose a normal reply instead of a generic fallback — do NOT prefix
+      // with SENT_DIRECTLY: so the pipeline loops back to Claude with this tool_result.
+      return 'The interactive product card could not be sent — the product is not currently available through the WhatsApp API, even though it exists in the catalog (this can happen for items pending review or not yet enabled for WhatsApp). Describe the product to the customer directly in your reply instead, using its name, price, and key specs from your product knowledge above. Do not mention any technical error to the customer.';
     }
   },
 

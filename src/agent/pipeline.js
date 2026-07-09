@@ -330,20 +330,22 @@ async function appendAdminMessage(phone, text) {
     s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
     await db.upsertSession(phone, s);
   }
-  await db.addMessage(phone, 'assistant', [{ type: 'text', text }], 'human', Date.now());
+  const id = await db.addMessage(phone, 'assistant', [{ type: 'text', text }], 'human', Date.now());
   s.lastSeen = Date.now();
   await db.upsertSession(phone, s);
+  return id;
 }
 
-async function appendAdminDocumentMessage(phone, filename, caption) {
+async function appendAdminDocumentMessage(phone, filename, caption, storedAs) {
   let s = await db.getSession(phone);
   if (!s) {
     s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
     await db.upsertSession(phone, s);
   }
-  await db.addMessage(phone, 'assistant', [{ type: 'document', filename, caption: caption || null }], 'human', Date.now());
+  const id = await db.addMessage(phone, 'assistant', [{ type: 'document', filename, caption: caption || null, storedAs: storedAs || null }], 'human', Date.now());
   s.lastSeen = Date.now();
   await db.upsertSession(phone, s);
+  return id;
 }
 
 module.exports = { processMessage, processImageMessage, pauseSession, resumeSession, appendAdminMessage, appendAdminDocumentMessage };

@@ -1,4 +1,6 @@
-const path = require('path');
+const path   = require('path');
+const fs     = require('fs');
+const crypto = require('crypto');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const session = require('express-session');
@@ -40,8 +42,10 @@ app.use(session({
   },
 }));
 
-// Quotation/document uploads for the admin dashboard — kept in memory since we
-// immediately re-upload to Meta's Media API rather than hosting the file ourselves.
+// Quotation/document uploads for the admin dashboard — buffered in memory, then
+// (a) re-uploaded to Meta's Media API to actually send it, and (b) written to
+// DOCUMENTS_DIR so the admin can re-open what was sent later (Meta's media API
+// doesn't give us a durable link back).
 const DOCUMENT_MIME_TYPES = new Set([
   'application/pdf',
   'application/msword',
@@ -57,6 +61,16 @@ const uploadDocument = multer({
     cb(null, true);
   },
 });
+
+const DOCUMENTS_DIR = path.join(__dirname, 'data', 'uploads');
+fs.mkdirSync(DOCUMENTS_DIR, { recursive: true });
+
+function saveDocumentToDisk(buffer, originalname) {
+  const safeName = originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100);
+  const storedAs = crypto.randomBytes(8).toString('hex') + '-' + safeName;
+  fs.writeFileSync(path.join(DOCUMENTS_DIR, storedAs), buffer);
+  return storedAs;
+}
 // Serves /manifest.webmanifest and /icons/* for the admin dashboard's "Add to Home Screen" support
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -215,9 +229,10 @@ function lastMsg(messages) {
 function renderMessages(messages) {
   return (messages || []).map(msg => {
     const t = fmtTime(msg.ts);
+    const idAttr = ' data-msg-id="' + (msg.id || 0) + '"';
     if (msg.source === 'system') return '';
     if (typeof msg.content === 'string') {
-      return '<div class="wa-row wa-row-in">' +
+      return '<div class="wa-row wa-row-in"' + idAttr + '>' +
         '<div class="wa-bubble wa-in">' + esc(msg.content) +
         '<span class="wa-ts">' + t + '</span></div></div>';
     }
@@ -226,7 +241,7 @@ function renderMessages(messages) {
     if (imgBlock && msg.role === 'user') {
       const capBlock = msg.content.find(b => b.type === 'text');
       const src = 'data:' + (imgBlock.source?.media_type || 'image/jpeg') + ';base64,' + (imgBlock.source?.data || '');
-      return '<div class="wa-row wa-row-in"><div class="wa-bubble wa-in wa-img-bubble">' +
+      return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in wa-img-bubble">' +
         '<img class="wa-img" src="' + src + '" alt="Photo from customer" loading="lazy"/>' +
         (capBlock ? '<div class="wa-img-cap">' + esc(capBlock.text) + '</div>' : '') +
         '<span class="wa-ts">' + t + '</span></div></div>';
@@ -234,7 +249,7 @@ function renderMessages(messages) {
     return msg.content.map(block => {
       if (block.type === 'text' && msg.role === 'assistant') {
         const human = msg.source === 'human';
-        return '<div class="wa-row wa-row-out">' +
+        return '<div class="wa-row wa-row-out"' + idAttr + '>' +
           '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + '">' +
           '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
           esc(block.text) +
@@ -242,21 +257,25 @@ function renderMessages(messages) {
           '</div></div>';
       }
       if (block.type === 'tool_use') {
-        return '<div class="wa-row wa-row-center">' +
+        return '<div class="wa-row wa-row-center"' + idAttr + '>' +
           '<div class="wa-system">&#128295; ' + esc(block.name) + '</div></div>';
       }
       if (block.type === 'document') {
         const human = msg.source === 'human';
-        return '<div class="wa-row wa-row-out">' +
+        const docInner = '<span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">' + esc(block.filename) + '</span>';
+        const docHtml = block.storedAs
+          ? '<a class="wa-doc" href="/admin/api/documents/' + encodeURIComponent(block.storedAs) + '" target="_blank" rel="noopener">' + docInner + '</a>'
+          : '<div class="wa-doc">' + docInner + '</div>';
+        return '<div class="wa-row wa-row-out"' + idAttr + '>' +
           '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + ' wa-doc-bubble">' +
           '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          '<div class="wa-doc"><span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">' + esc(block.filename) + '</span></div>' +
+          docHtml +
           (block.caption ? '<div class="wa-doc-cap">' + esc(block.caption) + '</div>' : '') +
           '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
           '</div></div>';
       }
       if (block.type === 'text' && msg.role === 'user') {
-        return '<div class="wa-row wa-row-in"><div class="wa-bubble wa-in">' + esc(block.text) +
+        return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in">' + esc(block.text) +
           '<span class="wa-ts">' + t + '</span></div></div>';
       }
       return '';
@@ -305,7 +324,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail) {
     const pid    = phone.replace(/\D/g,'');
     const domain = s.domain || 'general';
     const paused = !!s.humanTakeover;
-    const lastTs = s.messages.length > 0 ? s.messages[s.messages.length - 1].ts : 0;
+    const lastId = s.messages.length > 0 ? (s.messages[s.messages.length - 1].id || 0) : 0;
     const lead   = leadMap[phone] || null;
     const quickReplies = [
       ['&#128222; Call within hour', 'Thank you for reaching out! I will have one of our specialists call you within the hour.'],
@@ -316,7 +335,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail) {
       '<button class="wa-qr-btn" onclick="fillReply(\'' + pid + '\',\'' + text.replace(/'/g,"\\'") + '\')">' + label + '</button>'
     ).join('');
     return (
-      '<div class="wa-chat" id="chat-' + pid + '" data-phone="' + esc(phone) + '" data-last-ts="' + lastTs + '">' +
+      '<div class="wa-chat" id="chat-' + pid + '" data-phone="' + esc(phone) + '" data-last-id="' + lastId + '">' +
         '<div class="wa-chat-hdr">' +
           '<button class="wa-back" onclick="backToContacts()">&#8592;</button>' +
           '<div class="wa-av wa-av-' + domain + ' wa-av-sm">' + getInitials(phone) + '</div>' +
@@ -577,7 +596,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 @media(max-width:480px){.wa-img{width:180px}}
 
 .wa-doc-bubble{min-width:200px}
-.wa-doc{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.06);border-radius:8px;padding:8px 10px;margin-top:2px}
+.wa-doc{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.06);border-radius:8px;padding:8px 10px;margin-top:2px;color:inherit;text-decoration:none}
+a.wa-doc{cursor:pointer;transition:background .15s}
+a.wa-doc:hover{background:rgba(0,0,0,.12)}
+a.wa-doc .wa-doc-name{text-decoration:underline}
 .wa-doc-icon{font-size:1.3rem}
 .wa-doc-name{font-size:.85rem;font-weight:600;word-break:break-all}
 .wa-doc-cap{padding:6px 2px 0;font-size:.85rem;line-height:1.4}
@@ -1058,16 +1080,18 @@ async function handleSend(phone, pid) {
       body: JSON.stringify({ message: text })
     });
     if (!r.ok) { var e = await r.json(); throw new Error(e.error || 'Failed'); }
+    var result = await r.json();
     var msgs = document.getElementById('chatmsgs-' + pid);
     var d    = document.createElement('div');
     d.className = 'wa-row wa-row-out';
+    if (result.id) d.setAttribute('data-msg-id', result.id);
     var escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var now  = new Date().toLocaleTimeString('en-KE',{hour:'2-digit',minute:'2-digit',timeZone:'Africa/Nairobi'});
     d.innerHTML = '<div class="wa-bubble wa-out wa-human"><span class="wa-sender">&#128100; Human Agent</span>' + escaped + '<span class="wa-ts">' + now + ' <span class="wa-tick">&#10003;&#10003;</span></span></div>';
     msgs.appendChild(d);
     msgs.scrollTop = msgs.scrollHeight;
     ta.value = ''; ta.style.height = 'auto';
-    chatLastTs[pid] = Date.now();
+    if (result.id && result.id > (chatLastId[pid]||0)) chatLastId[pid] = result.id;
     var prev = document.querySelector('#contact-' + pid + ' .wa-ct-prev');
     if (prev) prev.textContent = '\\u{1F464} ' + text.slice(0, 42);
     toast('Message sent', 'ok');
@@ -1093,21 +1117,27 @@ async function handleSendDocument(phone, pid) {
       body: formData
     });
     if (!r.ok) { var e = await r.json(); throw new Error(e.error || 'Failed'); }
+    var result = await r.json();
     var msgs = document.getElementById('chatmsgs-' + pid);
     var d    = document.createElement('div');
     d.className = 'wa-row wa-row-out';
+    if (result.id) d.setAttribute('data-msg-id', result.id);
     var escapedName = file.name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var escapedCap  = caption.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var now  = new Date().toLocaleTimeString('en-KE',{hour:'2-digit',minute:'2-digit',timeZone:'Africa/Nairobi'});
+    var docInner = '<span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">' + escapedName + '</span>';
+    var docHtml = result.storedAs
+      ? '<a class="wa-doc" href="/admin/api/documents/' + encodeURIComponent(result.storedAs) + '" target="_blank" rel="noopener">' + docInner + '</a>'
+      : '<div class="wa-doc">' + docInner + '</div>';
     d.innerHTML = '<div class="wa-bubble wa-out wa-human wa-doc-bubble"><span class="wa-sender">&#128100; Human Agent</span>' +
-      '<div class="wa-doc"><span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">' + escapedName + '</span></div>' +
+      docHtml +
       (caption ? '<div class="wa-doc-cap">' + escapedCap + '</div>' : '') +
       '<span class="wa-ts">' + now + ' <span class="wa-tick">&#10003;&#10003;</span></span></div>';
     msgs.appendChild(d);
     msgs.scrollTop = msgs.scrollHeight;
     ta.value = ''; ta.style.height = 'auto';
     finput.value = '';
-    chatLastTs[pid] = Date.now();
+    if (result.id && result.id > (chatLastId[pid]||0)) chatLastId[pid] = result.id;
     var prev = document.querySelector('#contact-' + pid + ' .wa-ct-prev');
     if (prev) prev.textContent = '\\u{1F464} \\u{1F4C4} ' + file.name;
     toast('Document sent', 'ok');
@@ -1176,7 +1206,7 @@ async function handleResolveEscalation(btn) {
 
 // ── Smart polling (replaces full page reload) ─────────────────────────────────
 
-var chatLastTs      = {};   // pid → last message ts rendered for that chat
+var chatLastId       = {};   // pid → highest message id rendered for that chat
 var sessionLastSeen = {};   // pid → lastSeen from sessions API (for unread detection)
 var firstPoll       = true;
 
@@ -1218,15 +1248,16 @@ function clientLastMsgText(msg) {
 function renderSingleMsg(msg) {
   if (msg.source === 'system') return '';
   var t = clientFmtTime(msg.ts);
+  var idAttr = ' data-msg-id="'+(msg.id||0)+'"';
   if (typeof msg.content === 'string') {
-    return '<div class="wa-row wa-row-in"><div class="wa-bubble wa-in">'+clientEsc(msg.content)+'<span class="wa-ts">'+t+'</span></div></div>';
+    return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+clientEsc(msg.content)+'<span class="wa-ts">'+t+'</span></div></div>';
   }
   if (!Array.isArray(msg.content)) return '';
   var imgBlock = msg.content.find(function(b){ return b.type==='image'; });
   if (imgBlock && msg.role==='user') {
     var capBlock = msg.content.find(function(b){ return b.type==='text'; });
     var src = 'data:'+((imgBlock.source&&imgBlock.source.media_type)||'image/jpeg')+';base64,'+((imgBlock.source&&imgBlock.source.data)||'');
-    return '<div class="wa-row wa-row-in"><div class="wa-bubble wa-in wa-img-bubble">' +
+    return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in wa-img-bubble">' +
       '<img class="wa-img" src="'+src+'" alt="Photo from customer" loading="lazy"/>' +
       (capBlock ? '<div class="wa-img-cap">'+clientEsc(capBlock.text)+'</div>' : '') +
       '<span class="wa-ts">'+t+'</span></div></div>';
@@ -1234,30 +1265,34 @@ function renderSingleMsg(msg) {
   return msg.content.map(function(block) {
     if (block.type==='text' && msg.role==='assistant') {
       var h = msg.source==='human';
-      return '<div class="wa-row wa-row-out"><div class="wa-bubble wa-out'+(h?' wa-human':'')+'"><span class="wa-sender">'+(h?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>'+clientEsc(block.text)+'<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div></div>';
+      return '<div class="wa-row wa-row-out"'+idAttr+'><div class="wa-bubble wa-out'+(h?' wa-human':'')+'"><span class="wa-sender">'+(h?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>'+clientEsc(block.text)+'<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div></div>';
     }
     if (block.type==='tool_use') {
-      return '<div class="wa-row wa-row-center"><div class="wa-system">&#128295; '+clientEsc(block.name)+'</div></div>';
+      return '<div class="wa-row wa-row-center"'+idAttr+'><div class="wa-system">&#128295; '+clientEsc(block.name)+'</div></div>';
     }
     if (block.type==='document') {
       var hd = msg.source==='human';
-      return '<div class="wa-row wa-row-out"><div class="wa-bubble wa-out'+(hd?' wa-human':'')+' wa-doc-bubble">' +
+      var docInner = '<span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">'+clientEsc(block.filename)+'</span>';
+      var docHtml = block.storedAs
+        ? '<a class="wa-doc" href="/admin/api/documents/'+encodeURIComponent(block.storedAs)+'" target="_blank" rel="noopener">'+docInner+'</a>'
+        : '<div class="wa-doc">'+docInner+'</div>';
+      return '<div class="wa-row wa-row-out"'+idAttr+'><div class="wa-bubble wa-out'+(hd?' wa-human':'')+' wa-doc-bubble">' +
         '<span class="wa-sender">'+(hd?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>' +
-        '<div class="wa-doc"><span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">'+clientEsc(block.filename)+'</span></div>' +
+        docHtml +
         (block.caption ? '<div class="wa-doc-cap">'+clientEsc(block.caption)+'</div>' : '') +
         '<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div></div>';
     }
     if (block.type==='text' && msg.role==='user') {
-      return '<div class="wa-row wa-row-in"><div class="wa-bubble wa-in">'+clientEsc(block.text)+'<span class="wa-ts">'+t+'</span></div></div>';
+      return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+clientEsc(block.text)+'<span class="wa-ts">'+t+'</span></div></div>';
     }
     return '';
   }).join('');
 }
 
 async function fetchNewMessages(pid, phone, autoScroll) {
-  var lastTs = chatLastTs[pid] || 0;
+  var lastId = chatLastId[pid] || 0;
   try {
-    var r = await fetch('/admin/api/messages/'+encodeURIComponent(phone)+'/since/'+lastTs);
+    var r = await fetch('/admin/api/messages/'+encodeURIComponent(phone)+'/since-id/'+lastId);
     if (!r.ok) return;
     var newMsgs = await r.json();
     if (!newMsgs.length) return;
@@ -1266,6 +1301,12 @@ async function fetchNewMessages(pid, phone, autoScroll) {
     var atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
     var rendered = false;
     newMsgs.forEach(function(msg) {
+      // Defensive dedup: the optimistic send-bubble may have already rendered this
+      // exact message (data-msg-id) before this poll's response arrived.
+      if (msg.id && msgs.querySelector('[data-msg-id="'+msg.id+'"]')) {
+        if (msg.id > (chatLastId[pid]||0)) chatLastId[pid] = msg.id;
+        return;
+      }
       var html = renderSingleMsg(msg);
       if (html) {
         var tmp = document.createElement('div');
@@ -1273,7 +1314,7 @@ async function fetchNewMessages(pid, phone, autoScroll) {
         while (tmp.firstChild) msgs.appendChild(tmp.firstChild);
         rendered = true;
       }
-      if (msg.ts > (chatLastTs[pid]||0)) chatLastTs[pid] = msg.ts;
+      if (msg.id > (chatLastId[pid]||0)) chatLastId[pid] = msg.id;
     });
     if (rendered && (autoScroll ? atBottom : true)) msgs.scrollTop = msgs.scrollHeight;
     var lastM = newMsgs[newMsgs.length-1];
@@ -1327,7 +1368,7 @@ function toggleStats() {
 window.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('.wa-chat').forEach(function(chat) {
     var pid = chat.id.replace('chat-','');
-    chatLastTs[pid] = Number(chat.dataset.lastTs || 0);
+    chatLastId[pid] = Number(chat.dataset.lastId || 0);
   });
   if (window.innerWidth > 768) {
     var first = document.querySelector('.wa-contact');
@@ -1343,6 +1384,14 @@ window.addEventListener('DOMContentLoaded', function() {
   autoResubscribePush();
   pollUpdates();
   setInterval(pollUpdates, 10000);
+
+  // Browsers throttle setInterval in background tabs (sometimes to once a minute or
+  // less), so the 10s poll can stall while this tab isn't focused. Force an immediate
+  // re-sync the moment the admin switches back, instead of waiting for the next tick.
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible') pollUpdates();
+  });
+  window.addEventListener('focus', pollUpdates);
 });
 </script>
 </body>
@@ -1383,8 +1432,8 @@ app.post('/admin/api/session/:phone/send', async (req, res) => {
   if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
   try {
     await sendTextMessage(req.params.phone, message.trim());
-    await appendAdminMessage(req.params.phone, message.trim());
-    res.json({ ok: true });
+    const id = await appendAdminMessage(req.params.phone, message.trim());
+    res.json({ ok: true, id });
   } catch (err) {
     console.error('[admin] Send error:', err.message);
     res.status(500).json({ error: err.message });
@@ -1399,14 +1448,27 @@ app.post('/admin/api/session/:phone/send-document', (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
       const caption  = (req.body?.caption || '').trim();
+      const storedAs = saveDocumentToDisk(req.file.buffer, req.file.originalname);
       const mediaId  = await uploadMedia(req.file.buffer, req.file.mimetype, req.file.originalname);
       await sendDocumentMessage(req.params.phone, mediaId, req.file.originalname, caption);
-      await appendAdminDocumentMessage(req.params.phone, req.file.originalname, caption);
-      res.json({ ok: true, filename: req.file.originalname });
+      const id = await appendAdminDocumentMessage(req.params.phone, req.file.originalname, caption, storedAs);
+      res.json({ ok: true, filename: req.file.originalname, storedAs, id });
     } catch (err2) {
       console.error('[admin] Document send error:', err2.message);
       res.status(500).json({ error: err2.message });
     }
+  });
+});
+
+// Re-opens a previously sent quotation document. storedAs is a server-generated
+// random-prefixed filename (see saveDocumentToDisk) — path.basename() strips any
+// directory components as defense in depth against path traversal.
+app.get('/admin/api/documents/:storedAs', (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  const storedAs = path.basename(req.params.storedAs);
+  const filePath = path.join(DOCUMENTS_DIR, storedAs);
+  res.sendFile(filePath, err => {
+    if (err) res.status(err.status === 404 ? 404 : 500).send('Document not found');
   });
 });
 
@@ -1528,10 +1590,11 @@ app.get('/admin/api/sessions', async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// New messages for a phone since a timestamp
-app.get('/admin/api/messages/:phone/since/:ts', async (req, res) => {
+// New messages for a phone newer than a given message id (cursor, not a timestamp —
+// see getMessagesSinceId for why: avoids client/server clock-skew bugs)
+app.get('/admin/api/messages/:phone/since-id/:id', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  try { res.json(await db.getMessagesSince(req.params.phone, Number(req.params.ts))); }
+  try { res.json(await db.getMessagesSinceId(req.params.phone, Number(req.params.id))); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
