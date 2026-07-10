@@ -226,15 +226,29 @@ function lastMsg(messages) {
   return 'Message';
 }
 
-function renderMessages(messages) {
+function quoteBoxHtml(replyContext) {
+  if (!replyContext) return '';
+  const label = replyContext.sender === 'customer' ? 'Customer' : replyContext.sender === 'human' ? 'You' : 'AI Agent';
+  return '<div class="wa-quote"><span class="wa-quote-sender">' + esc(label) + '</span>' + esc(replyContext.preview || '') + '</div>';
+}
+
+function replyBtnHtml(waMessageId, preview, sender, paused) {
+  if (!waMessageId) return '';
+  return '<button type="button" class="wa-reply-btn" title="Reply" ' + (paused ? '' : 'disabled ') +
+    'data-wa-id="' + esc(waMessageId) + '" data-preview="' + esc(preview || '') + '" data-sender="' + esc(sender) + '" ' +
+    'onclick="startReply(this)">&#8617;</button>';
+}
+
+function renderMessages(messages, paused) {
   return (messages || []).map(msg => {
     const t = fmtTime(msg.ts);
     const idAttr = ' data-msg-id="' + (msg.id || 0) + '"';
+    const quote = quoteBoxHtml(msg.replyContext);
     if (msg.source === 'system') return '';
     if (typeof msg.content === 'string') {
       return '<div class="wa-row wa-row-in"' + idAttr + '>' +
-        '<div class="wa-bubble wa-in">' + esc(msg.content) +
-        '<span class="wa-ts">' + t + '</span></div></div>';
+        '<div class="wa-bubble wa-in">' + quote + esc(msg.content) +
+        '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, msg.content, 'customer', paused) + '</div>';
     }
     if (!Array.isArray(msg.content)) return '';
     const imgBlock = msg.content.find(b => b.type === 'image');
@@ -242,9 +256,10 @@ function renderMessages(messages) {
       const capBlock = msg.content.find(b => b.type === 'text');
       const src = 'data:' + (imgBlock.source?.media_type || 'image/jpeg') + ';base64,' + (imgBlock.source?.data || '');
       return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in wa-img-bubble">' +
+        quote +
         '<img class="wa-img" src="' + src + '" alt="Photo from customer" loading="lazy"/>' +
         (capBlock ? '<div class="wa-img-cap">' + esc(capBlock.text) + '</div>' : '') +
-        '<span class="wa-ts">' + t + '</span></div></div>';
+        '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, '📷 Photo', 'customer', paused) + '</div>';
     }
     return msg.content.map(block => {
       if (block.type === 'text' && msg.role === 'assistant') {
@@ -252,9 +267,9 @@ function renderMessages(messages) {
         return '<div class="wa-row wa-row-out"' + idAttr + '>' +
           '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + '">' +
           '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          esc(block.text) +
+          quote + esc(block.text) +
           '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
-          '</div></div>';
+          '</div>' + replyBtnHtml(msg.waMessageId, block.text, human ? 'human' : 'ai', paused) + '</div>';
       }
       if (block.type === 'tool_use') {
         return '<div class="wa-row wa-row-center"' + idAttr + '>' +
@@ -269,14 +284,14 @@ function renderMessages(messages) {
         return '<div class="wa-row wa-row-out"' + idAttr + '>' +
           '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + ' wa-doc-bubble">' +
           '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          docHtml +
+          quote + docHtml +
           (block.caption ? '<div class="wa-doc-cap">' + esc(block.caption) + '</div>' : '') +
           '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
-          '</div></div>';
+          '</div>' + replyBtnHtml(msg.waMessageId, '📄 ' + block.filename, human ? 'human' : 'ai', paused) + '</div>';
       }
       if (block.type === 'text' && msg.role === 'user') {
-        return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in">' + esc(block.text) +
-          '<span class="wa-ts">' + t + '</span></div></div>';
+        return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in">' + quote + esc(block.text) +
+          '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, block.text, 'customer', paused) + '</div>';
       }
       return '';
     }).join('');
@@ -352,10 +367,15 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail) {
           '</button>' +
         '</div>' +
         '<div class="wa-msgs" id="chatmsgs-' + pid + '">' +
-          renderMessages(s.messages) +
+          renderMessages(s.messages, paused) +
         '</div>' +
         '<div class="wa-input-area' + (paused ? '' : ' wa-input-locked') + '" id="wa-input-' + pid + '">' +
           (!paused ? '<div class="wa-lock-notice">&#9888;&#65039; Pause AI to reply directly</div>' : '') +
+          '<div class="wa-reply-banner" id="rbanner-' + pid + '" style="display:none">' +
+            '<div class="wa-reply-banner-body"><span class="wa-reply-banner-sender" id="rbanner-sender-' + pid + '"></span>' +
+            '<span class="wa-reply-banner-preview" id="rbanner-preview-' + pid + '"></span></div>' +
+            '<button type="button" class="wa-reply-cancel" onclick="cancelReply(\'' + pid + '\')">&#10005;</button>' +
+          '</div>' +
           '<div class="wa-quick-replies" id="qr-' + pid + '"' + (paused ? '' : ' style="display:none"') + '>' + quickReplies + '</div>' +
           '<div class="wa-input-row">' +
             '<input type="file" id="finput-' + pid + '" accept=".pdf,.doc,.docx,.xls,.xlsx" style="display:none" onchange="handleSendDocument(\'' + esc(phone) + '\',\'' + pid + '\')">' +
@@ -603,6 +623,26 @@ a.wa-doc .wa-doc-name{text-decoration:underline}
 .wa-doc-icon{font-size:1.3rem}
 .wa-doc-name{font-size:.85rem;font-weight:600;word-break:break-all}
 .wa-doc-cap{padding:6px 2px 0;font-size:.85rem;line-height:1.4}
+
+.wa-quote{background:rgba(0,0,0,.06);border-left:3px solid #25D366;border-radius:6px;padding:5px 8px;margin-bottom:5px;font-size:.8rem;line-height:1.35;max-height:2.7em;overflow:hidden}
+.wa-quote-sender{display:block;font-weight:700;color:#075E54;font-size:.75rem}
+.wa-in .wa-quote{border-left-color:#94a3b8}
+.wa-in .wa-quote-sender{color:#475569}
+
+.wa-row{position:relative}
+.wa-reply-btn{position:absolute;top:2px;background:#fff;border:1px solid #e2e8f0;border-radius:50%;width:26px;height:26px;font-size:.9rem;color:#64748b;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:.85;transition:opacity .15s,background .15s}
+.wa-row-in .wa-reply-btn{right:-4px}
+.wa-row-out .wa-reply-btn{left:-4px}
+.wa-reply-btn:hover:not(:disabled){opacity:1;background:#f0fdf4}
+.wa-reply-btn:disabled{opacity:0;pointer-events:none}
+@media(max-width:768px){.wa-reply-btn{opacity:.7}}
+
+.wa-reply-banner{display:flex;align-items:center;gap:8px;background:#f0f2f5;border-left:3px solid #25D366;border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:.8rem}
+.wa-reply-banner-body{flex:1;min-width:0}
+.wa-reply-banner-sender{display:block;font-weight:700;color:#075E54;font-size:.75rem}
+.wa-reply-banner-preview{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wa-reply-cancel{background:none;border:none;color:#64748b;font-size:1.1rem;cursor:pointer;padding:2px 6px;flex-shrink:0}
+
 .wa-attach{width:40px;height:40px;border-radius:50%;background:#fff;border:1px solid #d1d5db;color:#075E54;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
 .wa-attach:hover:not(:disabled){background:#f0fdf4}
 .wa-attach:disabled{color:#94a3b8;cursor:not-allowed}
@@ -1049,6 +1089,7 @@ async function handlePause(btn) {
       sbtn.disabled = true; sbtn.className = 'wa-send wa-send-disabled';
       if (abtn2) abtn2.disabled = true;
       if (qr) qr.style.display = 'none';
+      cancelReply(pid);
       if (!note) {
         var n = document.createElement('div');
         n.className = 'wa-lock-notice';
@@ -1072,12 +1113,13 @@ async function handleSend(phone, pid) {
   var btn  = document.getElementById('sbtn-' + pid);
   var text = ta.value.trim();
   if (!text) return;
+  var reply = replyTarget[pid] || null;
   btn.disabled = true; btn.innerHTML = '...';
   try {
     var r = await fetch('/admin/api/session/' + encodeURIComponent(phone) + '/send', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({ message: text, replyToWaId: reply ? reply.waId : undefined, replyPreview: reply ? reply.preview : undefined, replySender: reply ? reply.sender : undefined })
     });
     if (!r.ok) { var e = await r.json(); throw new Error(e.error || 'Failed'); }
     var result = await r.json();
@@ -1087,10 +1129,12 @@ async function handleSend(phone, pid) {
     if (result.id) d.setAttribute('data-msg-id', result.id);
     var escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var now  = new Date().toLocaleTimeString('en-KE',{hour:'2-digit',minute:'2-digit',timeZone:'Africa/Nairobi'});
-    d.innerHTML = '<div class="wa-bubble wa-out wa-human"><span class="wa-sender">&#128100; Human Agent</span>' + escaped + '<span class="wa-ts">' + now + ' <span class="wa-tick">&#10003;&#10003;</span></span></div>';
+    var quoteHtml = reply ? clientQuoteBoxHtml({ sender: reply.sender, preview: reply.preview }) : '';
+    d.innerHTML = '<div class="wa-bubble wa-out wa-human"><span class="wa-sender">&#128100; Human Agent</span>' + quoteHtml + escaped + '<span class="wa-ts">' + now + ' <span class="wa-tick">&#10003;&#10003;</span></span></div>';
     msgs.appendChild(d);
     msgs.scrollTop = msgs.scrollHeight;
     ta.value = ''; ta.style.height = 'auto';
+    cancelReply(pid);
     if (result.id && result.id > (chatLastId[pid]||0)) chatLastId[pid] = result.id;
     var prev = document.querySelector('#contact-' + pid + ' .wa-ct-prev');
     if (prev) prev.textContent = '\\u{1F464} ' + text.slice(0, 42);
@@ -1106,12 +1150,18 @@ async function handleSendDocument(phone, pid) {
   var ta      = document.getElementById('rinput-' + pid);
   var caption = ta.value.trim();
   var abtn    = document.getElementById('abtn-' + pid);
+  var reply   = replyTarget[pid] || null;
   abtn.disabled = true;
   toast('Sending ' + file.name + '...', 'ok');
   try {
     var formData = new FormData();
     formData.append('file', file);
     if (caption) formData.append('caption', caption);
+    if (reply) {
+      formData.append('replyToWaId', reply.waId);
+      formData.append('replyPreview', reply.preview);
+      formData.append('replySender', reply.sender);
+    }
     var r = await fetch('/admin/api/session/' + encodeURIComponent(phone) + '/send-document', {
       method: 'POST',
       body: formData
@@ -1129,14 +1179,16 @@ async function handleSendDocument(phone, pid) {
     var docHtml = result.storedAs
       ? '<a class="wa-doc" href="/admin/api/documents/' + encodeURIComponent(result.storedAs) + '" target="_blank" rel="noopener">' + docInner + '</a>'
       : '<div class="wa-doc">' + docInner + '</div>';
+    var quoteHtml = reply ? clientQuoteBoxHtml({ sender: reply.sender, preview: reply.preview }) : '';
     d.innerHTML = '<div class="wa-bubble wa-out wa-human wa-doc-bubble"><span class="wa-sender">&#128100; Human Agent</span>' +
-      docHtml +
+      quoteHtml + docHtml +
       (caption ? '<div class="wa-doc-cap">' + escapedCap + '</div>' : '') +
       '<span class="wa-ts">' + now + ' <span class="wa-tick">&#10003;&#10003;</span></span></div>';
     msgs.appendChild(d);
     msgs.scrollTop = msgs.scrollHeight;
     ta.value = ''; ta.style.height = 'auto';
     finput.value = '';
+    cancelReply(pid);
     if (result.id && result.id > (chatLastId[pid]||0)) chatLastId[pid] = result.id;
     var prev = document.querySelector('#contact-' + pid + ' .wa-ct-prev');
     if (prev) prev.textContent = '\\u{1F464} \\u{1F4C4} ' + file.name;
@@ -1209,6 +1261,28 @@ async function handleResolveEscalation(btn) {
 var chatLastId       = {};   // pid → highest message id rendered for that chat
 var sessionLastSeen = {};   // pid → lastSeen from sessions API (for unread detection)
 var firstPoll       = true;
+var replyTarget      = {};   // pid → {waId, preview, sender} currently selected to reply to, if any
+
+function startReply(btn) {
+  var chat = btn.closest('.wa-chat');
+  if (!chat) return;
+  var pid = chat.id.replace('chat-', '');
+  var waId = btn.dataset.waId, preview = btn.dataset.preview, sender = btn.dataset.sender;
+  replyTarget[pid] = { waId: waId, preview: preview, sender: sender };
+  var banner = document.getElementById('rbanner-' + pid);
+  var senderLabel = sender === 'customer' ? 'Customer' : sender === 'human' ? 'You' : 'AI Agent';
+  document.getElementById('rbanner-sender-' + pid).textContent = senderLabel;
+  document.getElementById('rbanner-preview-' + pid).textContent = preview;
+  if (banner) banner.style.display = 'flex';
+  var ta = document.getElementById('rinput-' + pid);
+  if (ta && !ta.disabled) ta.focus();
+}
+
+function cancelReply(pid) {
+  delete replyTarget[pid];
+  var banner = document.getElementById('rbanner-' + pid);
+  if (banner) banner.style.display = 'none';
+}
 
 function clientEsc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -1245,12 +1319,28 @@ function clientLastMsgText(msg) {
   }
   return '';
 }
-function renderSingleMsg(msg) {
+function clientQuoteBoxHtml(replyContext) {
+  if (!replyContext) return '';
+  var label = replyContext.sender==='customer' ? 'Customer' : replyContext.sender==='human' ? 'You' : 'AI Agent';
+  return '<div class="wa-quote"><span class="wa-quote-sender">'+clientEsc(label)+'</span>'+clientEsc(replyContext.preview||'')+'</div>';
+}
+
+function clientReplyBtnHtml(waMessageId, preview, sender, paused) {
+  if (!waMessageId) return '';
+  return '<button type="button" class="wa-reply-btn" title="Reply" '+(paused?'':'disabled ')+
+    'data-wa-id="'+clientEsc(waMessageId)+'" data-preview="'+clientEsc(preview||'')+'" data-sender="'+clientEsc(sender)+'" ' +
+    'onclick="startReply(this)">&#8617;</button>';
+}
+
+function renderSingleMsg(msg, pid) {
   if (msg.source === 'system') return '';
   var t = clientFmtTime(msg.ts);
   var idAttr = ' data-msg-id="'+(msg.id||0)+'"';
+  var quote = clientQuoteBoxHtml(msg.replyContext);
+  var pbtn = pid ? document.getElementById('pbtn-'+pid) : null;
+  var paused = pbtn ? pbtn.dataset.paused === 'true' : false;
   if (typeof msg.content === 'string') {
-    return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+clientEsc(msg.content)+'<span class="wa-ts">'+t+'</span></div></div>';
+    return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+quote+clientEsc(msg.content)+'<span class="wa-ts">'+t+'</span></div>'+clientReplyBtnHtml(msg.waMessageId, msg.content, 'customer', paused)+'</div>';
   }
   if (!Array.isArray(msg.content)) return '';
   var imgBlock = msg.content.find(function(b){ return b.type==='image'; });
@@ -1258,14 +1348,15 @@ function renderSingleMsg(msg) {
     var capBlock = msg.content.find(function(b){ return b.type==='text'; });
     var src = 'data:'+((imgBlock.source&&imgBlock.source.media_type)||'image/jpeg')+';base64,'+((imgBlock.source&&imgBlock.source.data)||'');
     return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in wa-img-bubble">' +
+      quote +
       '<img class="wa-img" src="'+src+'" alt="Photo from customer" loading="lazy"/>' +
       (capBlock ? '<div class="wa-img-cap">'+clientEsc(capBlock.text)+'</div>' : '') +
-      '<span class="wa-ts">'+t+'</span></div></div>';
+      '<span class="wa-ts">'+t+'</span></div>'+clientReplyBtnHtml(msg.waMessageId, '📷 Photo', 'customer', paused)+'</div>';
   }
   return msg.content.map(function(block) {
     if (block.type==='text' && msg.role==='assistant') {
       var h = msg.source==='human';
-      return '<div class="wa-row wa-row-out"'+idAttr+'><div class="wa-bubble wa-out'+(h?' wa-human':'')+'"><span class="wa-sender">'+(h?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>'+clientEsc(block.text)+'<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div></div>';
+      return '<div class="wa-row wa-row-out"'+idAttr+'><div class="wa-bubble wa-out'+(h?' wa-human':'')+'"><span class="wa-sender">'+(h?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>'+quote+clientEsc(block.text)+'<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div>'+clientReplyBtnHtml(msg.waMessageId, block.text, h?'human':'ai', paused)+'</div>';
     }
     if (block.type==='tool_use') {
       return '<div class="wa-row wa-row-center"'+idAttr+'><div class="wa-system">&#128295; '+clientEsc(block.name)+'</div></div>';
@@ -1278,12 +1369,12 @@ function renderSingleMsg(msg) {
         : '<div class="wa-doc">'+docInner+'</div>';
       return '<div class="wa-row wa-row-out"'+idAttr+'><div class="wa-bubble wa-out'+(hd?' wa-human':'')+' wa-doc-bubble">' +
         '<span class="wa-sender">'+(hd?'&#128100; Human Agent':'&#129302; AI Agent')+'</span>' +
-        docHtml +
+        quote + docHtml +
         (block.caption ? '<div class="wa-doc-cap">'+clientEsc(block.caption)+'</div>' : '') +
-        '<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div></div>';
+        '<span class="wa-ts">'+t+' <span class="wa-tick">&#10003;&#10003;</span></span></div>'+clientReplyBtnHtml(msg.waMessageId, '📄 '+block.filename, hd?'human':'ai', paused)+'</div>';
     }
     if (block.type==='text' && msg.role==='user') {
-      return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+clientEsc(block.text)+'<span class="wa-ts">'+t+'</span></div></div>';
+      return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in">'+quote+clientEsc(block.text)+'<span class="wa-ts">'+t+'</span></div>'+clientReplyBtnHtml(msg.waMessageId, block.text, 'customer', paused)+'</div>';
     }
     return '';
   }).join('');
@@ -1307,7 +1398,7 @@ async function fetchNewMessages(pid, phone, autoScroll) {
         if (msg.id > (chatLastId[pid]||0)) chatLastId[pid] = msg.id;
         return;
       }
-      var html = renderSingleMsg(msg);
+      var html = renderSingleMsg(msg, pid);
       if (html) {
         var tmp = document.createElement('div');
         tmp.innerHTML = html;
@@ -1428,12 +1519,16 @@ app.post('/admin/api/session/:phone/resume', async (req, res) => {
 
 app.post('/admin/api/session/:phone/send', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  const { message } = req.body || {};
+  const { message, replyToWaId, replyPreview, replySender } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
   try {
-    await sendTextMessage(req.params.phone, message.trim());
-    const id = await appendAdminMessage(req.params.phone, message.trim());
-    res.json({ ok: true, id });
+    const sendResult  = await sendTextMessage(req.params.phone, message.trim(), replyToWaId || undefined);
+    const waMessageId = sendResult?.messages?.[0]?.id || null;
+    const replyContext = replyToWaId
+      ? { waMessageId: replyToWaId, preview: String(replyPreview || '').slice(0, 120), sender: replySender || 'customer' }
+      : null;
+    const id = await appendAdminMessage(req.params.phone, message.trim(), waMessageId, replyContext);
+    res.json({ ok: true, id, waMessageId });
   } catch (err) {
     console.error('[admin] Send error:', err.message);
     res.status(500).json({ error: err.message });
@@ -1447,12 +1542,17 @@ app.post('/admin/api/session/:phone/send-document', (req, res) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
-      const caption  = (req.body?.caption || '').trim();
-      const storedAs = saveDocumentToDisk(req.file.buffer, req.file.originalname);
-      const mediaId  = await uploadMedia(req.file.buffer, req.file.mimetype, req.file.originalname);
-      await sendDocumentMessage(req.params.phone, mediaId, req.file.originalname, caption);
-      const id = await appendAdminDocumentMessage(req.params.phone, req.file.originalname, caption, storedAs);
-      res.json({ ok: true, filename: req.file.originalname, storedAs, id });
+      const caption     = (req.body?.caption || '').trim();
+      const replyToWaId = req.body?.replyToWaId || null;
+      const storedAs    = saveDocumentToDisk(req.file.buffer, req.file.originalname);
+      const mediaId     = await uploadMedia(req.file.buffer, req.file.mimetype, req.file.originalname);
+      const sendResult  = await sendDocumentMessage(req.params.phone, mediaId, req.file.originalname, caption, replyToWaId || undefined);
+      const waMessageId = sendResult?.messages?.[0]?.id || null;
+      const replyContext = replyToWaId
+        ? { waMessageId: replyToWaId, preview: String(req.body?.replyPreview || '').slice(0, 120), sender: req.body?.replySender || 'customer' }
+        : null;
+      const id = await appendAdminDocumentMessage(req.params.phone, req.file.originalname, caption, storedAs, waMessageId, replyContext);
+      res.json({ ok: true, filename: req.file.originalname, storedAs, id, waMessageId });
     } catch (err2) {
       console.error('[admin] Document send error:', err2.message);
       res.status(500).json({ error: err2.message });
@@ -1649,9 +1749,10 @@ app.post('/webhook', (req, res) => {
     const body  = req.body;
     const value = body?.entry?.[0]?.changes?.[0]?.value;
     if (!value?.messages?.length) return;
-    const message   = value.messages[0];
-    const from      = message.from;
-    const messageId = message.id;
+    const message     = value.messages[0];
+    const from        = message.from;
+    const messageId   = message.id;
+    const replyToWaId = message.context?.id || null; // set when the customer swiped-to-reply to a specific earlier message
     // ── Catalog order ──────────────────────────────────────────────────────────
     if (message.type === 'order' && message.order) {
       if (isDuplicate(messageId)) return;
@@ -1673,7 +1774,7 @@ app.post('/webhook', (req, res) => {
           const noteText = ord.text ? `\nCustomer note: "${ord.text}"` : '';
           const orderMsg = `I have placed an order from your WhatsApp catalog:\n${items.join('\n')}\nTotal: KShs ${total.toLocaleString('en-KE')}${noteText}`;
           console.log('[webhook] Catalog order from', from, '-', items.length, 'item(s), KShs', total);
-          await processMessage(from, orderMsg, messageId);
+          await processMessage(from, orderMsg, messageId, null, replyToWaId);
         } catch (err) {
           console.error('[webhook] Order processing error:', err);
         }
@@ -1688,7 +1789,7 @@ app.post('/webhook', (req, res) => {
       const reply = ia.button_reply?.title || ia.list_reply?.title || ia.nfm_reply?.submitted_form_values || 'I selected an option.';
       console.log('[webhook] Interactive reply from', from + ':', reply);
       notifyNewMessage(from, String(reply)).catch(e => console.error('[push] notify error:', e));
-      processMessage(from, String(reply), messageId).catch(err => console.error('[webhook] processMessage error:', err));
+      processMessage(from, String(reply), messageId, null, replyToWaId).catch(err => console.error('[webhook] processMessage error:', err));
       return;
     }
 
@@ -1711,7 +1812,7 @@ app.post('/webhook', (req, res) => {
             await sendTextMessage(from, "That image is a bit too large for me to process — could you resend a smaller photo?");
             return;
           }
-          await processImageMessage(from, media, caption, messageId);
+          await processImageMessage(from, media, caption, messageId, replyToWaId);
         } catch (err) {
           console.error('[webhook] Image processing error:', err);
           await sendTextMessage(from, "I couldn't load that image — could you try sending it again?").catch(() => {});
@@ -1724,7 +1825,7 @@ app.post('/webhook', (req, res) => {
     if (message.type !== 'text' || !message.text?.body) {
       if (isDuplicate(messageId)) return;
       notifyNewMessage(from, `sent a ${message.type} message`).catch(e => console.error('[push] notify error:', e));
-      processMessage(from, 'I sent a non-text message. Please let me know how I can help you via text.', messageId)
+      processMessage(from, 'I sent a non-text message. Please let me know how I can help you via text.', messageId, null, replyToWaId)
         .catch(err => console.error('[webhook] processMessage error:', err));
       return;
     }
@@ -1736,7 +1837,7 @@ app.post('/webhook', (req, res) => {
     console.log('[webhook] From', from + ':', body2.slice(0, 80));
     if (referral) console.log('[webhook] Ad referral:', JSON.stringify(referral));
     notifyNewMessage(from, body2).catch(e => console.error('[push] notify error:', e));
-    processMessage(from, body2, messageId, referral).catch(err => console.error('[webhook] processMessage error:', err));
+    processMessage(from, body2, messageId, referral, replyToWaId).catch(err => console.error('[webhook] processMessage error:', err));
   } catch (err) { console.error('[webhook] Parse error:', err); }
 });
 

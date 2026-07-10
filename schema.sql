@@ -36,14 +36,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS messages (
-  id      INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  phone   VARCHAR(30)  NOT NULL,
-  role    VARCHAR(20)  NOT NULL,
-  content LONGTEXT     NOT NULL,
-  source  VARCHAR(20)  DEFAULT NULL,
-  ts      BIGINT       NOT NULL,
+  id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  phone          VARCHAR(30)  NOT NULL,
+  role           VARCHAR(20)  NOT NULL,
+  content        LONGTEXT     NOT NULL,
+  source         VARCHAR(20)  DEFAULT NULL,
+  ts             BIGINT       NOT NULL,
+  wa_message_id  VARCHAR(128) DEFAULT NULL,   -- WhatsApp's own id (wamid...) for this message, so other messages can quote-reply to it
+  reply_context  TEXT         DEFAULT NULL,   -- JSON snapshot {waMessageId, preview, sender} of the message this one is replying to, if any
   PRIMARY KEY (id),
-  INDEX idx_phone_ts (phone, ts, id)
+  INDEX idx_phone_ts (phone, ts, id),
+  INDEX idx_wa_message_id (wa_message_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS leads (

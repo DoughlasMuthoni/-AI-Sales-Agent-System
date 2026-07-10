@@ -16,7 +16,9 @@ async function post(phoneNumberId, accessToken, payload) {
   return response.json();
 }
 
-async function sendTextMessage(to, body) {
+// contextMessageId (optional): another message's WhatsApp id (wamid...) to quote-reply to,
+// rendered by WhatsApp as the native "swipe to reply" bubble
+async function sendTextMessage(to, body, contextMessageId) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
   return post(phoneNumberId, accessToken, {
@@ -25,6 +27,7 @@ async function sendTextMessage(to, body) {
     to,
     type: 'text',
     text: { body },
+    ...(contextMessageId ? { context: { message_id: contextMessageId } } : {}),
   });
 }
 
@@ -150,7 +153,7 @@ async function uploadMedia(buffer, mimeType, filename) {
 }
 
 // Sends a previously-uploaded document (see uploadMedia) to a customer
-async function sendDocumentMessage(to, mediaId, filename, caption) {
+async function sendDocumentMessage(to, mediaId, filename, caption, contextMessageId) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
   return post(phoneNumberId, accessToken, {
@@ -159,6 +162,7 @@ async function sendDocumentMessage(to, mediaId, filename, caption) {
     to,
     type: 'document',
     document: { id: mediaId, filename, ...(caption ? { caption } : {}) },
+    ...(contextMessageId ? { context: { message_id: contextMessageId } } : {}),
   });
 }
 

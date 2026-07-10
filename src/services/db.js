@@ -77,12 +77,30 @@ async function upsertSession(phone, session) {
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-async function addMessage(phone, role, content, source = null, ts = null) {
+async function addMessage(phone, role, content, source = null, ts = null, waMessageId = null, replyContext = null) {
   const [result] = await pool.query(
-    'INSERT INTO messages (phone, role, content, source, ts) VALUES (?, ?, ?, ?, ?)',
-    [phone, role, serialize(content), source || null, ts || Date.now()]
+    'INSERT INTO messages (phone, role, content, source, ts, wa_message_id, reply_context) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [phone, role, serialize(content), source || null, ts || Date.now(), waMessageId || null, replyContext ? JSON.stringify(replyContext) : null]
   );
   return result.insertId;
+}
+
+// Backfills a message's WhatsApp id after the send API call returns (addMessage is
+// often called before the send completes, so the id isn't known at insert time)
+async function setMessageWaId(id, waMessageId) {
+  if (!waMessageId) return;
+  await pool.query('UPDATE messages SET wa_message_id = ? WHERE id = ?', [waMessageId, id]);
+}
+
+// Looks up a message by WhatsApp's id — used to build a reply-context snapshot when
+// a customer swipes-to-reply to a specific earlier message on their end
+async function getMessageByWaId(phone, waMessageId) {
+  const [rows] = await pool.query(
+    'SELECT role, content, source FROM messages WHERE phone = ? AND wa_message_id = ? LIMIT 1',
+    [phone, waMessageId]
+  );
+  if (!rows[0]) return null;
+  return { role: rows[0].role, content: parseContent(rows[0].content), source: rows[0].source };
 }
 
 // Last `limit` messages in chronological order, orphaned tool_result trimmed
@@ -149,15 +167,17 @@ async function getAllMessages(phone) {
 // race conditions that caused duplicate/missing messages in the live chat view.
 async function getMessagesSinceId(phone, sinceId) {
   const [rows] = await pool.query(
-    'SELECT id, role, content, source, ts FROM messages WHERE phone = ? AND id > ? ORDER BY id ASC',
+    'SELECT id, role, content, source, ts, wa_message_id, reply_context FROM messages WHERE phone = ? AND id > ? ORDER BY id ASC',
     [phone, Number(sinceId)]
   );
   return rows.map(r => ({
-    id:      r.id,
-    role:    r.role,
-    content: parseContent(r.content),
-    source:  r.source,
-    ts:      Number(r.ts),
+    id:           r.id,
+    role:         r.role,
+    content:      parseContent(r.content),
+    source:       r.source,
+    ts:           Number(r.ts),
+    waMessageId:  r.wa_message_id || null,
+    replyContext: r.reply_context ? parseContent(r.reply_context) : null,
   }));
 }
 
@@ -192,18 +212,20 @@ async function getSessionsSummary() {
 async function getAllSessionsWithMessages() {
   const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
   const [messages] = await pool.query(
-    'SELECT id, phone, role, content, source, ts FROM messages ORDER BY ts ASC, id ASC'
+    'SELECT id, phone, role, content, source, ts, wa_message_id, reply_context FROM messages ORDER BY ts ASC, id ASC'
   );
 
   const msgMap = {};
   for (const m of messages) {
     if (!msgMap[m.phone]) msgMap[m.phone] = [];
     msgMap[m.phone].push({
-      id:      m.id,
-      role:    m.role,
-      content: parseContent(m.content),
-      source:  m.source,
-      ts:      Number(m.ts),
+      id:           m.id,
+      role:         m.role,
+      content:      parseContent(m.content),
+      source:       m.source,
+      ts:           Number(m.ts),
+      waMessageId:  m.wa_message_id || null,
+      replyContext: m.reply_context ? parseContent(m.reply_context) : null,
     });
   }
 
@@ -328,6 +350,8 @@ module.exports = {
   getSession,
   upsertSession,
   addMessage,
+  setMessageWaId,
+  getMessageByWaId,
   getApiMessages,
   getAllMessages,
   getMessagesSinceId,

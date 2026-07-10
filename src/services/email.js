@@ -31,6 +31,7 @@ async function sendLeadNotification(lead) {
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Location</td><td style="padding:8px;">${lead.location}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Property</td><td style="padding:8px;">${lead.property_type}</td></tr>
       ${lead.estimated_budget ? `<tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Budget</td><td style="padding:8px;">${lead.estimated_budget}</td></tr>` : ''}
+      ${lead.notes ? `<tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Notes</td><td style="padding:8px;">${lead.notes}</td></tr>` : ''}
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Time</td><td style="padding:8px;">${timestamp()}</td></tr>
     </table>
     <p style="color:#666;font-size:13px;margin-top:16px;">Follow up with this prospect to close the deal.</p>

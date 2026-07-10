@@ -69,34 +69,56 @@ const claudeTools = toolDefinitions.map(t => ({
   input_schema: t.inputSchema,
 }));
 
-async function processMessage(from, messageBody, messageId, referral = null) {
+async function processMessage(from, messageBody, messageId, referral = null, replyToWaId = null) {
   if (processing.has(from)) {
     console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
     return;
   }
   processing.add(from);
   try {
-    await _processMessage(from, messageBody, messageId, referral);
+    await _processMessage(from, messageBody, messageId, referral, replyToWaId);
   } finally {
     processing.delete(from);
   }
 }
 
-async function processImageMessage(from, media, caption, messageId) {
+async function processImageMessage(from, media, caption, messageId, replyToWaId = null) {
   if (processing.has(from)) {
     console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
     return;
   }
   processing.add(from);
   try {
-    await _processImageMessage(from, media, caption, messageId);
+    await _processImageMessage(from, media, caption, messageId, replyToWaId);
   } finally {
     processing.delete(from);
   }
 }
 
-async function _processMessage(from, messageBody, messageId, referral = null) {
+// Looks up the message a customer swiped-to-reply to (if any) and builds a small
+// snapshot for the admin dashboard to render — a live DB join isn't worth it since
+// this is purely a UI affordance, not something Claude needs to see.
+async function buildReplyContext(from, replyToWaId) {
+  if (!replyToWaId) return null;
+  const target = await db.getMessageByWaId(from, replyToWaId);
+  if (!target) return null;
+  let preview = '';
+  if (typeof target.content === 'string') preview = target.content;
+  else if (Array.isArray(target.content)) {
+    const textBlock = target.content.find(b => b.type === 'text');
+    const docBlock   = target.content.find(b => b.type === 'document');
+    const imgBlock    = target.content.find(b => b.type === 'image');
+    if (textBlock) preview = textBlock.text;
+    else if (docBlock) preview = '📄 ' + docBlock.filename;
+    else if (imgBlock) preview = '📷 Photo';
+  }
+  const sender = target.role === 'user' ? 'customer' : (target.source === 'human' ? 'agent' : 'ai');
+  return { waMessageId: replyToWaId, preview: String(preview).slice(0, 120), sender };
+}
+
+async function _processMessage(from, messageBody, messageId, referral = null, replyToWaId = null) {
   const now = Date.now();
+  const replyContext = await buildReplyContext(from, replyToWaId);
 
   let session = await db.getSession(from);
 
@@ -118,7 +140,7 @@ async function _processMessage(from, messageBody, messageId, referral = null) {
   // Human has taken over — record the customer message but don't respond with AI
   if (session.humanTakeover) {
     session.lastSeen = now;
-    await db.addMessage(from, 'user', messageBody, null, now);
+    await db.addMessage(from, 'user', messageBody, null, now, messageId, replyContext);
     await db.upsertSession(from, session);
     return;
   }
@@ -165,7 +187,7 @@ async function _processMessage(from, messageBody, messageId, referral = null) {
   }
 
   session.lastSeen = now;
-  await db.addMessage(from, 'user', messageBody, null, now);
+  await db.addMessage(from, 'user', messageBody, null, now, messageId, replyContext);
   await db.upsertSession(from, session);
 
   await sendTypingIndicator(from, messageId);
@@ -175,8 +197,9 @@ async function _processMessage(from, messageBody, messageId, referral = null) {
 }
 
 // Customer sent an image (with an optional caption) — analyzed via Claude's vision input
-async function _processImageMessage(from, media, caption, messageId) {
+async function _processImageMessage(from, media, caption, messageId, replyToWaId = null) {
   const now = Date.now();
+  const replyContext = await buildReplyContext(from, replyToWaId);
 
   let session = await db.getSession(from);
 
@@ -202,7 +225,7 @@ async function _processImageMessage(from, media, caption, messageId) {
   // Human has taken over — record the customer's image but don't respond with AI
   if (session.humanTakeover) {
     session.lastSeen = now;
-    await db.addMessage(from, 'user', contentBlocks, null, now);
+    await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
     await db.upsertSession(from, session);
     return;
   }
@@ -213,7 +236,7 @@ async function _processImageMessage(from, media, caption, messageId) {
   }
 
   session.lastSeen = now;
-  await db.addMessage(from, 'user', contentBlocks, null, now);
+  await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
   await db.upsertSession(from, session);
 
   await sendTypingIndicator(from, messageId);
@@ -243,7 +266,7 @@ async function runAgenticLoop(from, session, systemPrompt) {
     });
     console.error('[pipeline] Claude responded, stop_reason:', response.stop_reason, 'blocks:', response.content.length);
 
-    await db.addMessage(from, 'assistant', response.content, null, Date.now());
+    const assistantMsgId = await db.addMessage(from, 'assistant', response.content, null, Date.now());
 
     if (response.stop_reason === 'end_turn' || response.stop_reason === 'max_tokens') {
       const text = response.content
@@ -252,7 +275,15 @@ async function runAgenticLoop(from, session, systemPrompt) {
         .join('\n')
         .trim();
       console.error('[pipeline] Sending text reply, length:', text.length);
-      if (text) await sendTextMessage(from, text);
+      if (text) {
+        try {
+          const sendResult = await sendTextMessage(from, text);
+          const waId = sendResult?.messages?.[0]?.id;
+          if (waId) await db.setMessageWaId(assistantMsgId, waId);
+        } catch (err) {
+          console.error('[pipeline] sendTextMessage failed:', err.message);
+        }
+      }
       console.error('[pipeline] Done for', from);
       break;
     }
@@ -324,25 +355,25 @@ async function resumeSession(phone) {
   await db.upsertSession(phone, s);
 }
 
-async function appendAdminMessage(phone, text) {
+async function appendAdminMessage(phone, text, waMessageId = null, replyContext = null) {
   let s = await db.getSession(phone);
   if (!s) {
     s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
     await db.upsertSession(phone, s);
   }
-  const id = await db.addMessage(phone, 'assistant', [{ type: 'text', text }], 'human', Date.now());
+  const id = await db.addMessage(phone, 'assistant', [{ type: 'text', text }], 'human', Date.now(), waMessageId, replyContext);
   s.lastSeen = Date.now();
   await db.upsertSession(phone, s);
   return id;
 }
 
-async function appendAdminDocumentMessage(phone, filename, caption, storedAs) {
+async function appendAdminDocumentMessage(phone, filename, caption, storedAs, waMessageId = null, replyContext = null) {
   let s = await db.getSession(phone);
   if (!s) {
     s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
     await db.upsertSession(phone, s);
   }
-  const id = await db.addMessage(phone, 'assistant', [{ type: 'document', filename, caption: caption || null, storedAs: storedAs || null }], 'human', Date.now());
+  const id = await db.addMessage(phone, 'assistant', [{ type: 'document', filename, caption: caption || null, storedAs: storedAs || null }], 'human', Date.now(), waMessageId, replyContext);
   s.lastSeen = Date.now();
   await db.upsertSession(phone, s);
   return id;
