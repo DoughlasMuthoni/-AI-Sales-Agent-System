@@ -3,6 +3,7 @@ const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontext
 const { toolDefinitions } = require('./tools.js');
 const { sendLeadNotification, sendCallbackNotification, sendEscalationNotification } = require('../services/email.js');
 const { sendTextMessage, sendCatalogMessage, sendProductMessage, sendProductListMessage } = require('../services/whatsapp.js');
+const { normalizePhone } = require('../utils/phone.js');
 const db = require('../services/db.js');
 
 // Pricing in Kenyan Shillings (KShs) — indicative ranges only
@@ -25,23 +26,210 @@ const SOLAR_RATES = {
   },
 };
 
+// perMetre/pump/defaultDepth rate estimates were removed 2026-07 — they were never validated
+// against real costs and gave customers untrustworthy numbers in chat (see CLAUDE.md item 9).
+// New-drilling quotes now always defer to schedule_callback instead of a chat estimate.
 const BOREHOLE_RATES = {
-  perMetre: { min: 1800, max: 3200 },
-  pump: { min: 50000, max: 180000 },
   rehabilitation: { min: 40000, max: 120000 },
-  defaultDepth: { residential: 80, commercial: 100, agricultural: 90 },
 };
 
-function getSolarQuote(system_size_kw, location, property_type, system_type) {
+// Elevated steel water towers — not in the live product feed (see prompts.js), so this
+// pricing is admin-editable via its own DB tables (tower_packages/tower_tank_prices/
+// tower_foundation_prices — see schema.sql and the "Tower Pricing" admin tab) instead of the
+// product feed. All prices include 16% VAT + installation.
+
+// Internal tankType stays 'plastic' (matches the DB rows) — this is only for customer-facing
+// text, since Waterlift specifically uses Jojo-brand plastic tanks.
+const TANK_TYPE_DISPLAY = { plastic: 'Jojo', steel: 'steel' };
+
+function normalizeCapacityKey(tankCapacity) {
+  return String(tankCapacity || '').toLowerCase().replace(/[\s,]/g, '');
+}
+
+function tankPriceLabel(tankType, capacityLabel) {
+  const t = TANK_TYPE_DISPLAY[tankType] || tankType;
+  const capitalized = t.charAt(0).toUpperCase() + t.slice(1);
+  return `${capitalized} tank, ${capacityLabel}`;
+}
+
+// Loads all three tower pricing tables from the DB and shapes them into the in-memory form
+// the matching logic below expects. Queried fresh each time rather than cached — this is a
+// small table (a couple dozen rows) only read when a tower quote/PDF is actually requested,
+// not on every chat message, so a live query is cheap and always reflects the latest edit.
+async function loadTowerPricing() {
+  const [foundationRows, tankRows, packageRows] = await Promise.all([
+    db.getTowerFoundationPrices(),
+    db.getTowerTankPrices(),
+    db.getTowerPackages(),
+  ]);
+
+  const foundationPrices = {};
+  foundationRows.forEach(r => { foundationPrices[r.foundation_type] = Number(r.price); });
+
+  const tankPrices = {};
+  tankRows.forEach(r => {
+    tankPrices[`${r.tank_type}:${r.capacity_key}`] = {
+      label: tankPriceLabel(r.tank_type, r.capacity_label),
+      price: Number(r.price),
+    };
+  });
+
+  const packages = packageRows.map(r => ({
+    height: Number(r.height_m),
+    tankCount: Number(r.tank_count),
+    tankType: r.tank_type,
+    capacityKey: r.capacity_key,
+    capacityLabel: r.capacity_label,
+    foundation: r.foundation_type.charAt(0).toUpperCase() + r.foundation_type.slice(1),
+    fabricationPrice: Number(r.fabrication_price),
+  }));
+
+  return { foundationPrices, tankPrices, packages };
+}
+
+function matchTowerPackage(packages, height, count, tank_type, capKey) {
+  // Multiple packages can share height/count/type (e.g. 12m steel comes in 24m³/48m³/50m³/
+  // 100m³), so capacity MUST be given to disambiguate — don't silently fall back to the first.
+  const candidates = packages.filter(p =>
+    (!height || p.height === height) &&
+    (!count || p.tankCount === count) &&
+    (!tank_type || p.tankType === tank_type)
+  );
+  return candidates.length === 1 && !capKey
+    ? candidates[0]
+    : candidates.find(p => capKey && p.capacityKey === capKey);
+}
+
+async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location) {
+  const { foundationPrices, tankPrices, packages } = await loadTowerPricing();
+  const height = Number(tower_height_m) || null;
+  const count  = Number(tank_count) || null;
+  const capKey = normalizeCapacityKey(tank_capacity);
+
+  const pkg = matchTowerPackage(packages, height, count, tank_type, capKey);
+
+  if (pkg) {
+    const foundationPrice = foundationPrices[pkg.foundation.toLowerCase()];
+    const tankInfo = tankPrices[`${pkg.tankType}:${pkg.capacityKey}`];
+    const total = pkg.fabricationPrice + foundationPrice + tankInfo.price * pkg.tankCount;
+    return (
+      `Complete package price for a ${pkg.height}m elevated steel water tower with ${pkg.tankCount} x ${pkg.capacityLabel} ${TANK_TYPE_DISPLAY[pkg.tankType] || pkg.tankType} tank(s)${location ? ' (' + location + ')' : ''}:\n` +
+      `💰 KShs ${total.toLocaleString()}\n\n` +
+      `Includes the steel super structure, ${pkg.foundation} foundation, and the tank(s) — inclusive of 16% VAT and standard installation. ` +
+      `Transport to site is quoted separately based on distance and accessibility. ` +
+      `Final price is confirmed after a site visit (soil test determines Pad vs Raft foundation). Prices valid 30 days.`
+    );
+  }
+
+  // No exact standard package match — instead of stalling with no number, give an honest
+  // indicative range from whatever standard packages fit the details we DO have (fewer
+  // details given = wider range). This lets a customer get a real price signal on the very
+  // first ask instead of the agent gating any number behind a full battery of qualifying
+  // questions. Narrows to an exact price once height+count+type+capacity all match a package
+  // (handled by the pkg branch above).
+  const candidates = packages.filter(p =>
+    (!height || p.height === height) &&
+    (!count || p.tankCount === count) &&
+    (!tank_type || p.tankType === tank_type) &&
+    (!capKey || p.capacityKey === capKey)
+  );
+
+  if (candidates.length) {
+    const totals = candidates.map(p => {
+      const fp = foundationPrices[p.foundation.toLowerCase()];
+      const ti = tankPrices[`${p.tankType}:${p.capacityKey}`];
+      return p.fabricationPrice + fp + ti.price * p.tankCount;
+    });
+    const min = Math.min(...totals);
+    const max = Math.max(...totals);
+    const knownBits = [
+      height ? `${height}m height` : null,
+      count ? `${count} tank(s)` : null,
+      tank_type ? `${TANK_TYPE_DISPLAY[tank_type] || tank_type} tank` : null,
+    ].filter(Boolean).join(', ');
+
+    return (
+      `Indicative price range for an elevated steel water tower${knownBits ? ' (' + knownBits + ')' : ''}${location ? ' — ' + location : ''}:\n` +
+      `💰 KShs ${min.toLocaleString()}${min === max ? '' : ' – KShs ' + max.toLocaleString()}\n\n` +
+      (min === max
+        ? `Includes the steel super structure, foundation, and tank(s) — inclusive of 16% VAT and standard installation. `
+        : `The exact price depends on tank capacity/count and foundation type (confirmed on site visit) — share those and I'll narrow it to a precise figure. `) +
+      `Transport to site is quoted separately based on distance and accessibility. Prices valid 30 days.`
+    );
+  }
+
+  // Truly nothing matches even loosely (e.g. a non-standard height) — build a component
+  // estimate instead of guessing a fabrication cost that doesn't scale linearly.
+  const tankInfo = tank_type && capKey ? tankPrices[`${tank_type}:${capKey}`] : null;
+  const foundationGuess = height && height >= 9 ? 'raft' : 'pad';
+  const foundationPrice = foundationPrices[foundationGuess];
+
+  const lines = [`This is a custom tower/tank combination outside our standard packages${location ? ' (' + location + ')' : ''} — here's an indicative breakdown:`];
+  if (foundationPrice) lines.push(`Foundation (likely ${foundationGuess === 'raft' ? 'Raft' : 'Pad'}, confirmed on site visit): KShs ${foundationPrice.toLocaleString()}`);
+  if (tankInfo) lines.push(`${tankInfo.label}: KShs ${tankInfo.price.toLocaleString()} each${count ? ' x ' + count : ''}`);
+  lines.push('The super structure cost also scales with height and tank load — for an exact total, use schedule_callback so our team can prepare a tailored proposal.');
+  return lines.join('\n');
+}
+
+// Itemized breakdown for the branded PDF quote (src/services/pdfQuote.js). Reuses the same
+// DB-backed package/tank/foundation data as getTowerQuote() so the two never drift apart.
+async function getTowerQuoteBreakdown(tower_height_m, tank_count, tank_type, tank_capacity) {
+  const { foundationPrices, tankPrices, packages } = await loadTowerPricing();
+  const height = Number(tower_height_m) || null;
+  const count  = Number(tank_count) || null;
+  const capKey = normalizeCapacityKey(tank_capacity);
+
+  const pkg = matchTowerPackage(packages, height, count, tank_type, capKey);
+  const tankInfo = tank_type && capKey ? tankPrices[`${tank_type}:${capKey}`] : null;
+
+  if (pkg) {
+    const foundationPrice = foundationPrices[pkg.foundation.toLowerCase()];
+    const pkgTankInfo = tankPrices[`${pkg.tankType}:${pkg.capacityKey}`];
+    const tankAmount = pkgTankInfo.price * pkg.tankCount;
+    return {
+      isStandard: true,
+      height: pkg.height,
+      tankCount: pkg.tankCount,
+      tankType: pkg.tankType,
+      capacityLabel: pkg.capacityLabel,
+      foundationType: pkg.foundation,
+      fabricationPrice: pkg.fabricationPrice,
+      foundationPrice,
+      tankUnitPrice: pkgTankInfo.price,
+      tankAmount,
+      grandTotal: pkg.fabricationPrice + foundationPrice + tankAmount,
+    };
+  }
+
+  // No exact standard package — return what we can compute and leave the rest for a
+  // tailored quote rather than guessing a fabrication cost that doesn't scale linearly.
+  const foundationGuess = height && height >= 9 ? 'Raft' : 'Pad';
+  const foundationPrice = foundationPrices[foundationGuess.toLowerCase()];
+  const tankAmount = tankInfo ? tankInfo.price * (count || 1) : null;
+
+  return {
+    isStandard: false,
+    height, tankCount: count, tankType: tank_type,
+    capacityLabel: tankInfo ? tankInfo.label.split(', ').slice(1).join(', ') : (tank_capacity || null),
+    foundationType: foundationGuess,
+    fabricationPrice: null,
+    foundationPrice,
+    tankUnitPrice: tankInfo ? tankInfo.price : null,
+    tankAmount,
+    grandTotal: null,
+  };
+}
+
+async function getSolarQuote(system_size_kw, location, property_type, system_type) {
   const kw = system_size_kw || 5;
   const type = (system_type || 'backup').toLowerCase();
   const prop = property_type || 'residential';
 
-  if (type.includes('pump') || type.includes('water')) {
+  if (type.includes('pump') || type.includes('water') && !type.includes('heat')) {
     const ranges = SOLAR_RATES.pumping.any.ranges;
     const range = ranges.find(r => kw >= r[0] && kw <= r[1]) || ranges[ranges.length - 1];
     return (
-      `Indicative price range for a ${kw}kW solar water pumping system (${location}):\n` +
+      `Indicative price range for a ${kw}kW solar water pumping system${location ? ' (' + location + ')' : ''}:\n` +
       `💰 KShs ${range[2]} – KShs ${range[3]}\n\n` +
       `Includes solar panels, INVT pumping inverter, submersible pump, cabling, and installation. ` +
       `A site assessment is required for a firm quote.`
@@ -49,13 +237,14 @@ function getSolarQuote(system_size_kw, location, property_type, system_type) {
   }
 
   if (type.includes('heat') || type.includes('geyser') || type.includes('hot water')) {
-    return (
-      `Solar water heater pricing:\n` +
-      `☀️ 200-litre pressurised system: KShs 138,600\n` +
-      `☀️ 300-litre pressurised system: KShs 194,000\n` +
-      `💧 300-litre Heat Pump: KShs 291,555\n\n` +
-      `Prices include supply and installation. Contact us at +254 768 117 070 to order.`
-    );
+    // Priced from the live catalog (not hardcoded) — see catalogSync.js. Falls back to a
+    // generic message if the catalog hasn't been synced yet rather than showing stale numbers.
+    const results = await db.searchProducts('heat pump water heater');
+    if (!results.length) {
+      return 'Solar water heaters and heat pumps (200L/300L) are available — use get_product_info or contact +254 768 117 070 for current pricing.';
+    }
+    const lines = results.map(p => `☀️ ${p.name}: KShs ${Number(p.price).toLocaleString()}`);
+    return `Solar water heater pricing:\n${lines.join('\n')}\n\nPrices include supply and installation. Contact us at +254 768 117 070 to order.`;
   }
 
   const rateTable = type.includes('grid') ? SOLAR_RATES.gridtied : SOLAR_RATES.backup;
@@ -64,7 +253,7 @@ function getSolarQuote(system_size_kw, location, property_type, system_type) {
   const systemLabel = type.includes('grid') ? 'grid-tied' : 'solar backup (off-grid)';
 
   return (
-    `Indicative price range for a ${kw}kW ${systemLabel} solar system (${prop}, ${location}):\n` +
+    `Indicative price range for a ${kw}kW ${systemLabel} solar system (${prop}${location ? ', ' + location : ''}):\n` +
     `💰 KShs ${range[2]} – KShs ${range[3]}\n\n` +
     `Includes solar panels, inverter, batteries (backup systems), mounting, cabling, and installation. ` +
     `${type.includes('grid') ? 'Grid-tied systems can save over 70% on your electricity bill.' : 'Backup systems provide power independence and average 50% electricity savings.'} ` +
@@ -75,7 +264,7 @@ function getSolarQuote(system_size_kw, location, property_type, system_type) {
 function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabilitation) {
   if (is_rehabilitation) {
     return (
-      `Indicative price range for borehole rehabilitation (${location}):\n` +
+      `Indicative price range for borehole rehabilitation${location ? ' (' + location + ')' : ''}:\n` +
       `💰 KShs ${BOREHOLE_RATES.rehabilitation.min.toLocaleString()} – KShs ${BOREHOLE_RATES.rehabilitation.max.toLocaleString()}\n\n` +
       `Includes deep cleaning, unblocking, pump inspection, and flow optimisation. ` +
       `Actual cost depends on borehole condition and depth. A site inspection is required first. ` +
@@ -83,25 +272,26 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
     );
   }
 
-  const depth = borehole_depth_m || BOREHOLE_RATES.defaultDepth[property_type] || 80;
-  const drillLow = depth * BOREHOLE_RATES.perMetre.min;
-  const drillHigh = depth * BOREHOLE_RATES.perMetre.max;
-  const totalLow = drillLow + BOREHOLE_RATES.pump.min;
-  const totalHigh = drillHigh + BOREHOLE_RATES.pump.max;
-
+  // New drilling deliberately has NO numeric price/range here — drilling cost genuinely varies
+  // too much by site (geology, depth, mobilization distance) to give a trustworthy estimate in
+  // chat, and the real pricing tool (src/services/drillingCalc.js, driven by a full costing
+  // engine) needs inputs a customer wouldn't naturally provide over WhatsApp. Always defer to
+  // schedule_callback so the admin team can prepare an accurate quote from a site assessment.
   return (
-    `Indicative price range for a new borehole (~${depth}m depth, ${property_type}, ${location}):\n` +
-    `💰 KShs ${totalLow.toLocaleString()} – KShs ${totalHigh.toLocaleString()}\n\n` +
-    `Includes hydrogeological survey, drilling, PVC/steel casing, submersible pump, test pumping, and water quality testing. ` +
-    `Actual depth depends on site geology — our team serves 40+ counties across Kenya. ` +
-    `Typical yield: 1,000–20,000+ litres per hour. A free site assessment is required for a firm quote.\n` +
+    `Borehole drilling cost depends heavily on your specific site — depth, ground geology, and distance from our base all affect the price, so a number given in chat here could be significantly off. ` +
+    `What I can do is get one of our drilling engineers to review your location and prepare an accurate written quote for you.\n\n` +
+    `Let's book that — use schedule_callback, or share your location${property_type ? ' and confirm this is for a ' + property_type + ' property' : ''} and I'll arrange it. ` +
     `Contact: +254 768 117 070 | support@waterliftsolar.africa`
   );
 }
 
 const toolHandlers = {
   async qualify_lead(input) {
-    const lead = { ...input, status: 'new', capturedAt: new Date().toISOString() };
+    // Claude captures the phone as the customer typed it (e.g. "0712345678", "+254 712 345 678"),
+    // which won't match the wa_id-format session key WhatsApp uses — normalizing here keeps the
+    // Leads tab's phone in sync with the real conversation so admin actions (like sending a
+    // quote) append to the existing chat instead of silently opening a new one.
+    const lead = { ...input, phone: normalizePhone(input.phone), status: 'new', capturedAt: new Date().toISOString() };
     await db.insertLead(lead);
     console.error('[MCP] Lead qualified:', input.name, input.phone);
     sendLeadNotification(lead);
@@ -117,9 +307,15 @@ const toolHandlers = {
   },
 
   async send_quote(input) {
-    const { service, system_size_kw, borehole_depth_m, location, property_type, system_type, is_rehabilitation } = input;
-    if (service === 'solar') return getSolarQuote(system_size_kw, location, property_type, system_type);
-    if (service === 'borehole') return getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabilitation);
+    const {
+      service, system_size_kw, borehole_depth_m, location, property_type, system_type, is_rehabilitation,
+      is_tower_quote, tower_height_m, tank_count, tank_type, tank_capacity,
+    } = input;
+    if (service === 'solar') return await getSolarQuote(system_size_kw, location, property_type, system_type);
+    if (service === 'borehole') {
+      if (is_tower_quote) return await getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location);
+      return getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabilitation);
+    }
     return 'Unable to generate a quote — please contact us at +254 768 117 070 or support@waterliftsolar.africa';
   },
 
@@ -174,8 +370,22 @@ const toolHandlers = {
       // Claude already has this product's name/price/specs in its system prompt, so
       // let it compose a normal reply instead of a generic fallback — do NOT prefix
       // with SENT_DIRECTLY: so the pipeline loops back to Claude with this tool_result.
-      return 'The interactive product card could not be sent — the product is not currently available through the WhatsApp API, even though it exists in the catalog (this can happen for items pending review or not yet enabled for WhatsApp). Describe the product to the customer directly in your reply instead, using its name, price, and key specs from your product knowledge above. Do not mention any technical error to the customer.';
+      return 'The interactive product card could not be sent — the product is not currently available through the WhatsApp API, even though it exists in the catalog (this can happen for items pending review or not yet enabled for WhatsApp). Describe the product to the customer directly in your reply instead, using its name, price, and key specs from get_product_info. Do not mention any technical error to the customer.';
     }
+  },
+
+  async get_product_info(input) {
+    const { query } = input;
+    if (!query || !query.trim()) return 'No search term provided.';
+    const results = await db.searchProducts(query.trim());
+    if (!results.length) {
+      return `No products found matching "${query}". Ask the customer for more detail, or offer to check with the team directly.`;
+    }
+    return results.map(p => {
+      const price = 'KShs ' + Number(p.price).toLocaleString('en-KE');
+      const desc = p.description ? ' — ' + p.description.replace(/\s+/g, ' ').slice(0, 220).trim() : '';
+      return `${p.name} — ${price} (ID: ${p.retailer_id})${desc}`;
+    }).join('\n');
   },
 
   async escalate_to_human(input) {
@@ -214,4 +424,4 @@ async function executeTool(name, input) {
   return await handler(input);
 }
 
-module.exports = { mcpServer, executeTool };
+module.exports = { mcpServer, executeTool, getTowerQuoteBreakdown, TANK_TYPE_DISPLAY };

@@ -78,6 +78,27 @@ const toolDefinitions = [
           type: 'boolean',
           description: 'Set true if this is a borehole rehabilitation quote, not new drilling (borehole only)',
         },
+        is_tower_quote: {
+          type: 'boolean',
+          description: 'Set true if this is an elevated steel water tower quote, not drilling or rehabilitation (borehole only)',
+        },
+        tower_height_m: {
+          type: 'number',
+          description: 'Water tower height in metres: 6, 9, or 12 (tower quotes only)',
+        },
+        tank_count: {
+          type: 'number',
+          description: 'Number of tanks on the tower, e.g. 1, 2, or 4 (tower quotes only)',
+        },
+        tank_type: {
+          type: 'string',
+          enum: ['plastic', 'steel'],
+          description: 'Tank material — plastic (10,000L) or steel (24/48/50/100 m3) (tower quotes only)',
+        },
+        tank_capacity: {
+          type: 'string',
+          description: 'Tank capacity, e.g. "10000L" for plastic or "24m3"/"48m3"/"50m3"/"100m3" for steel (tower quotes only)',
+        },
         location: { type: 'string', description: 'County or town in Kenya' },
         property_type: {
           type: 'string',
@@ -85,7 +106,7 @@ const toolDefinitions = [
           description: 'Type of property',
         },
       },
-      required: ['service', 'location', 'property_type'],
+      required: ['service'],
     },
   },
   {
@@ -115,6 +136,21 @@ const toolDefinitions = [
         },
       },
       required: ['type'],
+    },
+  },
+  {
+    name: 'get_product_info',
+    description:
+      'Look up a product\'s current price, description, and specs by name or keyword (e.g. "300L heat pump", "borehole casing", "6mm submersible cable"). Always use this for exact pricing instead of relying on memory — the catalog is synced separately from a live feed and prices can change without notice.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Product name or keyword to search for',
+        },
+      },
+      required: ['query'],
     },
   },
   {
