@@ -99,6 +99,10 @@ const toolDefinitions = [
           type: 'string',
           description: 'Tank capacity, e.g. "10000L" for plastic or "24m3"/"48m3"/"50m3"/"100m3" for steel (tower quotes only)',
         },
+        structure_only: {
+          type: 'boolean',
+          description: 'Set true ONLY if the customer explicitly asks for the steel structure/fabrication price alone, separate from foundation and tank (tower quotes only). Default false returns the complete installed package price (structure + foundation + tank).',
+        },
         location: { type: 'string', description: 'County or town in Kenya' },
         property_type: {
           type: 'string',

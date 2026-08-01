@@ -39,6 +39,54 @@ async function createAdminUser(email, passwordHash) {
   return result.insertId;
 }
 
+// Active (non-expired) dashboard login sessions, for the admin "Active Devices" view. Reads the
+// raw express-mysql-session table directly — that library doesn't expose a listing API — and
+// parses out just the fields this app itself writes into req.session (email/userAgent/loginAt),
+// ignoring express-session's own cookie bookkeeping in the same JSON blob.
+async function getActiveAdminSessions() {
+  const [rows] = await pool.query(
+    'SELECT session_id, expires, data FROM admin_sessions WHERE expires > UNIX_TIMESTAMP() ORDER BY expires DESC'
+  );
+  return rows.map(r => {
+    let data = {};
+    try { data = JSON.parse(r.data || '{}'); } catch (e) { /* corrupt/legacy row — skip fields */ }
+    return {
+      sessionId: r.session_id,
+      email:     data.email || null,
+      userAgent: data.userAgent || null,
+      loginAt:   data.loginAt || null,
+      expiresAt: r.expires * 1000,
+    };
+  }).filter(s => s.email); // drop rows from before login (saveUninitialized:false mostly prevents these, but be defensive)
+}
+
+async function revokeAdminSession(sessionId) {
+  await pool.query('DELETE FROM admin_sessions WHERE session_id = ?', [sessionId]);
+}
+
+// ── Blocked numbers ──────────────────────────────────────────────────────────
+
+async function isPhoneBlocked(phone) {
+  const [rows] = await pool.query('SELECT 1 FROM blocked_numbers WHERE phone = ? LIMIT 1', [phone]);
+  return rows.length > 0;
+}
+
+async function blockNumber(phone, reason) {
+  await pool.query(
+    'INSERT INTO blocked_numbers (phone, reason) VALUES (?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
+    [phone, reason || null]
+  );
+}
+
+async function unblockNumber(phone) {
+  await pool.query('DELETE FROM blocked_numbers WHERE phone = ?', [phone]);
+}
+
+async function getBlockedNumbers() {
+  const [rows] = await pool.query('SELECT * FROM blocked_numbers ORDER BY blocked_at DESC');
+  return rows;
+}
+
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 async function getSession(phone) {
@@ -130,19 +178,30 @@ async function getApiMessages(phone, limit = 20) {
   }));
 }
 
-// Claude's Messages API has a reserved native `document` content-block type (for PDF
-// understanding) with its own required schema ({type:'document', source:{...}}) — it
-// is NOT the same thing as the {type:'document', filename, caption} block this app
-// stores when an admin sends a quotation file. Sending our shape under that reserved
-// name makes Claude reject the entire request with a 400. Swap it for a plain text
-// block here (Claude-facing only — the admin dashboard's own rendering reads from
-// getAllSessionsWithMessages/getMessagesSinceId instead, so its rich document bubble is unaffected).
+// Claude's Messages API has reserved native `document` and `image` content-block types with
+// their own required schemas ({type:'document'|'image', source:{...}}) — neither is the same
+// thing as the {type:'document'|'image', filename, caption} blocks this app stores when an
+// admin sends a quotation file or photo (no `source`, since there's no image/PDF data to hand
+// back to Claude for those). Sending our shape under a reserved name makes Claude reject the
+// whole request with a 400. Swap both for a plain text block here (Claude-facing only — the
+// admin dashboard's own rendering reads from getAllSessionsWithMessages/getMessagesSinceId
+// instead, so its rich document/photo bubble is unaffected). A customer-sent image block
+// always has `source` (real base64 data), so it passes through untouched.
 function sanitizeForClaude(content) {
   if (!Array.isArray(content)) return content;
   return content.map(block => {
     if (block?.type === 'document' && !block.source) {
       const label = block.caption ? `${block.filename} — ${block.caption}` : block.filename;
       return { type: 'text', text: `[Sent document: ${label}]` };
+    }
+    if (block?.type === 'image' && !block.source) {
+      const label = block.caption ? `${block.filename} — ${block.caption}` : block.filename;
+      return { type: 'text', text: `[Sent photo: ${label}]` };
+    }
+    // Claude has no native video content-block type at all (unlike image/document) — a `video`
+    // block must never reach the API in any form. Swapped for text regardless of source.
+    if (block?.type === 'video') {
+      return { type: 'text', text: '[Customer sent a video — flagged for human review, not visible to you]' };
     }
     return block;
   });
@@ -160,6 +219,95 @@ async function getAllMessages(phone) {
     source:  r.source,
     ts:      Number(r.ts),
   }));
+}
+
+// Every message across every conversation, joined with session (domain/escalated) and the
+// most recently captured lead for that phone (if any) — for bulk conversation-analysis export.
+// A phone can have more than one lead row (e.g. re-qualified later); the subquery picks only
+// the latest one per phone so this doesn't duplicate message rows.
+async function getAllMessagesForExport() {
+  const [rows] = await pool.query(`
+    SELECT m.phone, m.role, m.content, m.source, m.ts,
+           s.domain, s.escalated, s.human_takeover, s.ad_referral,
+           l.status AS lead_status, l.service AS lead_service, l.property_type AS lead_property_type
+    FROM messages m
+    LEFT JOIN sessions s ON s.phone = m.phone
+    LEFT JOIN leads l ON l.phone = m.phone AND l.captured_at = (
+      SELECT MAX(l2.captured_at) FROM leads l2 WHERE l2.phone = m.phone
+    )
+    ORDER BY m.phone, m.ts ASC, m.id ASC
+  `);
+  return rows.map(r => ({
+    phone: r.phone,
+    role: r.role,
+    content: parseContent(r.content),
+    source: r.source,
+    ts: Number(r.ts),
+    domain: r.domain,
+    escalated: !!r.escalated,
+    humanTakeover: !!r.human_takeover,
+    adReferral: r.ad_referral,
+    leadStatus: r.lead_status,
+    leadService: r.lead_service,
+    leadPropertyType: r.lead_property_type,
+  }));
+}
+
+// Powers the admin dashboard's Analytics tab — all-time totals computed via SQL aggregation
+// (not pulled into JS and reduced) since the messages/leads tables only grow over time. Mirrors
+// the same methodology used for the one-off conversion analysis this was built to replace:
+// leads deduped to the latest status per phone (see getAllMessagesForExport above), and
+// system-injected bootstrap messages (source='system' — the "[Context — not from customer]"
+// date-seed / "Understood." pairs) excluded from message counts since they'd inflate averages
+// with content no customer or AI actually composed.
+async function getAnalyticsSummary() {
+  const [[{ totalConversations }]] = await pool.query('SELECT COUNT(*) AS totalConversations FROM sessions');
+  const [[{ totalLeads }]] = await pool.query('SELECT COUNT(DISTINCT phone) AS totalLeads FROM leads');
+  const [[{ escalatedCount }]] = await pool.query('SELECT COUNT(*) AS escalatedCount FROM sessions WHERE escalated = 1');
+
+  const [domainRows] = await pool.query(
+    "SELECT COALESCE(domain, 'undetected') AS domain, COUNT(*) AS count FROM sessions GROUP BY domain ORDER BY count DESC"
+  );
+
+  const [statusRows] = await pool.query(`
+    SELECT l.status, COUNT(*) AS count
+    FROM leads l
+    INNER JOIN (SELECT phone, MAX(captured_at) AS max_captured FROM leads GROUP BY phone) latest
+      ON latest.phone = l.phone AND latest.max_captured = l.captured_at
+    GROUP BY l.status
+    ORDER BY count DESC
+  `);
+
+  const [convoRows] = await pool.query(`
+    SELECT (lp.phone IS NOT NULL) AS hasLead, COUNT(DISTINCT m.phone) AS conversations, COUNT(*) AS totalMessages
+    FROM messages m
+    LEFT JOIN (SELECT DISTINCT phone FROM leads) lp ON lp.phone = m.phone
+    WHERE m.source IS NULL OR m.source = 'human'
+    GROUP BY hasLead
+  `);
+  const withLead    = convoRows.find(r => r.hasLead === 1) || { conversations: 0, totalMessages: 0 };
+  const withoutLead = convoRows.find(r => r.hasLead === 0) || { conversations: 0, totalMessages: 0 };
+
+  return {
+    totalConversations,
+    totalLeads,
+    conversionRatePct: totalConversations > 0 ? round2(totalLeads / totalConversations * 100) : 0,
+    escalation: {
+      count: escalatedCount,
+      total: totalConversations,
+      pct: totalConversations > 0 ? round2(escalatedCount / totalConversations * 100) : 0,
+    },
+    domainSplit: domainRows.map(r => ({ domain: r.domain, count: r.count })),
+    leadsByStatus: statusRows.map(r => ({ status: r.status, count: r.count })),
+    messagesPerConversation: {
+      withLead:    { conversations: withLead.conversations, avgMessages: withLead.conversations > 0 ? round2(withLead.totalMessages / withLead.conversations) : 0 },
+      withoutLead: { conversations: withoutLead.conversations, avgMessages: withoutLead.conversations > 0 ? round2(withoutLead.totalMessages / withoutLead.conversations) : 0 },
+    },
+  };
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
 }
 
 // Messages for a phone newer than a given message id (admin polling). Cursoring by
@@ -344,9 +492,275 @@ async function deletePushSubscriptionByEndpoint(endpoint) {
   await pool.query('DELETE FROM push_subscriptions WHERE endpoint_hash = ?', [hashEndpoint(endpoint)]);
 }
 
+// ── App settings (key/value) ────────────────────────────────────────────────────
+
+async function getSetting(key) {
+  const [rows] = await pool.query('SELECT setting_value FROM app_settings WHERE setting_key = ?', [key]);
+  return rows[0] ? rows[0].setting_value : null;
+}
+
+async function setSetting(key, value) {
+  await pool.query(
+    'INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)',
+    [key, value]
+  );
+}
+
+// ── Product catalog ──────────────────────────────────────────────────────────────
+
+// Replaces the whole catalog in one go — feed is the single source of truth, so
+// products no longer present in the feed are removed rather than left stale.
+async function replaceProducts(products) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query('DELETE FROM products');
+    if (products.length) {
+      const values = products.map(p => [
+        p.retailerId, p.name, p.description || null, p.price, p.currency || 'KES',
+        p.category || null, p.vertical || null, p.availability || null,
+      ]);
+      await conn.query(
+        `INSERT INTO products (retailer_id, name, description, price, currency, category, vertical, availability)
+         VALUES ?`,
+        [values]
+      );
+    }
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function searchProducts(query, limit = 8) {
+  const [rows] = await pool.query(
+    `SELECT retailer_id, name, description, price, currency, category, availability
+     FROM products
+     WHERE MATCH(name, category) AGAINST (? IN NATURAL LANGUAGE MODE)
+        OR name LIKE ? OR category LIKE ?
+     LIMIT ?`,
+    [query, `%${query}%`, `%${query}%`, limit]
+  );
+  return rows;
+}
+
+async function getAllProducts() {
+  const [rows] = await pool.query('SELECT * FROM products ORDER BY category, name');
+  return rows;
+}
+
+async function getProductCount() {
+  const [rows] = await pool.query('SELECT COUNT(*) AS count FROM products');
+  return rows[0].count;
+}
+
+// ── Tower pricing (admin-editable, not part of the synced product feed) ─────────
+
+async function getTowerFoundationPrices() {
+  const [rows] = await pool.query('SELECT foundation_type, price FROM tower_foundation_prices');
+  return rows;
+}
+
+async function upsertTowerFoundationPrice(foundationType, price) {
+  await pool.query(
+    'INSERT INTO tower_foundation_prices (foundation_type, price) VALUES (?, ?) ON DUPLICATE KEY UPDATE price = VALUES(price)',
+    [foundationType, price]
+  );
+}
+
+async function deleteTowerFoundationPrice(foundationType) {
+  await pool.query('DELETE FROM tower_foundation_prices WHERE foundation_type = ?', [foundationType]);
+}
+
+async function getTowerTankPrices() {
+  const [rows] = await pool.query('SELECT * FROM tower_tank_prices ORDER BY tank_type, capacity_key');
+  return rows;
+}
+
+async function upsertTowerTankPrice(tank) {
+  if (tank.id) {
+    await pool.query(
+      'UPDATE tower_tank_prices SET tank_type = ?, capacity_key = ?, capacity_label = ?, price = ? WHERE id = ?',
+      [tank.tank_type, tank.capacity_key, tank.capacity_label, tank.price, tank.id]
+    );
+    return tank.id;
+  }
+  const [result] = await pool.query(
+    'INSERT INTO tower_tank_prices (tank_type, capacity_key, capacity_label, price) VALUES (?, ?, ?, ?)',
+    [tank.tank_type, tank.capacity_key, tank.capacity_label, tank.price]
+  );
+  return result.insertId;
+}
+
+async function deleteTowerTankPrice(id) {
+  await pool.query('DELETE FROM tower_tank_prices WHERE id = ?', [id]);
+}
+
+async function getTowerPackages() {
+  const [rows] = await pool.query('SELECT * FROM tower_packages ORDER BY height_m, tank_type, capacity_key');
+  return rows;
+}
+
+async function upsertTowerPackage(pkg) {
+  if (pkg.id) {
+    await pool.query(
+      `UPDATE tower_packages SET height_m = ?, tank_count = ?, tank_type = ?, capacity_key = ?,
+         capacity_label = ?, foundation_type = ?, fabrication_price = ? WHERE id = ?`,
+      [pkg.height_m, pkg.tank_count, pkg.tank_type, pkg.capacity_key, pkg.capacity_label, pkg.foundation_type, pkg.fabrication_price, pkg.id]
+    );
+    return pkg.id;
+  }
+  const [result] = await pool.query(
+    `INSERT INTO tower_packages (height_m, tank_count, tank_type, capacity_key, capacity_label, foundation_type, fabrication_price)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [pkg.height_m, pkg.tank_count, pkg.tank_type, pkg.capacity_key, pkg.capacity_label, pkg.foundation_type, pkg.fabrication_price]
+  );
+  return result.insertId;
+}
+
+async function deleteTowerPackage(id) {
+  await pool.query('DELETE FROM tower_packages WHERE id = ?', [id]);
+}
+
+// ── Drilling quotation pricing (admin-editable inputs for drillingCalc.js) ──────
+
+async function getDrillingSettings() {
+  const [rows] = await pool.query('SELECT setting_key, setting_value FROM drilling_settings');
+  const settings = {};
+  rows.forEach(r => { settings[r.setting_key] = r.setting_value; });
+  return settings;
+}
+
+async function setDrillingSetting(key, value) {
+  await pool.query(
+    'INSERT INTO drilling_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)',
+    [key, value]
+  );
+}
+
+async function getDrillingPenetrationRates() {
+  const [rows] = await pool.query('SELECT * FROM drilling_penetration_rates ORDER BY minutes_per_rod');
+  return rows;
+}
+
+async function upsertDrillingPenetrationRate(rate) {
+  if (rate.id) {
+    await pool.query(
+      'UPDATE drilling_penetration_rates SET label = ?, minutes_per_rod = ?, rod_length_m = ? WHERE id = ?',
+      [rate.label, rate.minutes_per_rod, rate.rod_length_m, rate.id]
+    );
+    return rate.id;
+  }
+  const [result] = await pool.query(
+    'INSERT INTO drilling_penetration_rates (label, minutes_per_rod, rod_length_m) VALUES (?, ?, ?)',
+    [rate.label, rate.minutes_per_rod, rate.rod_length_m]
+  );
+  return result.insertId;
+}
+
+async function deleteDrillingPenetrationRate(id) {
+  await pool.query('DELETE FROM drilling_penetration_rates WHERE id = ?', [id]);
+}
+
+async function getDrillingLineItems(category) {
+  const [rows] = category
+    ? await pool.query('SELECT * FROM drilling_line_items WHERE category = ? ORDER BY sort_order, id', [category])
+    : await pool.query('SELECT * FROM drilling_line_items ORDER BY category, sort_order, id');
+  return rows;
+}
+
+async function upsertDrillingLineItem(item) {
+  if (item.id) {
+    await pool.query(
+      'UPDATE drilling_line_items SET category = ?, name = ?, default_qty = ?, default_rate = ?, sort_order = ? WHERE id = ?',
+      [item.category, item.name, item.default_qty, item.default_rate, item.sort_order || 0, item.id]
+    );
+    return item.id;
+  }
+  const [result] = await pool.query(
+    'INSERT INTO drilling_line_items (category, name, default_qty, default_rate, sort_order) VALUES (?, ?, ?, ?, ?)',
+    [item.category, item.name, item.default_qty, item.default_rate, item.sort_order || 0]
+  );
+  return result.insertId;
+}
+
+async function deleteDrillingLineItem(id) {
+  await pool.query('DELETE FROM drilling_line_items WHERE id = ?', [id]);
+}
+
+// ── Solar quotation pricing (admin-editable BOQ templates for solarQuote.js) ────
+
+async function getSolarSettings() {
+  const [rows] = await pool.query('SELECT setting_key, setting_value FROM solar_settings');
+  const settings = {};
+  rows.forEach(r => { settings[r.setting_key] = r.setting_value; });
+  return settings;
+}
+
+async function setSolarSetting(key, value) {
+  await pool.query(
+    'INSERT INTO solar_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)',
+    [key, value]
+  );
+}
+
+async function getSolarKvaTiers() {
+  const [rows] = await pool.query('SELECT * FROM solar_kva_tiers ORDER BY sort_order, tier_key');
+  return rows;
+}
+
+async function upsertSolarKvaTier(tier) {
+  await pool.query(
+    'INSERT INTO solar_kva_tiers (tier_key, label, sort_order) VALUES (?, ?, ?) ' +
+    'ON DUPLICATE KEY UPDATE label = VALUES(label), sort_order = VALUES(sort_order)',
+    [tier.tier_key, tier.label, tier.sort_order || 0]
+  );
+  return tier.tier_key;
+}
+
+async function deleteSolarKvaTier(tierKey) {
+  await pool.query('DELETE FROM solar_line_items WHERE tier_key = ?', [tierKey]);
+  await pool.query('DELETE FROM solar_kva_tiers WHERE tier_key = ?', [tierKey]);
+}
+
+async function getSolarLineItems(tierKey) {
+  const [rows] = tierKey
+    ? await pool.query('SELECT * FROM solar_line_items WHERE tier_key = ? ORDER BY sort_order, id', [tierKey])
+    : await pool.query('SELECT * FROM solar_line_items ORDER BY tier_key, sort_order, id');
+  return rows;
+}
+
+async function upsertSolarLineItem(item) {
+  if (item.id) {
+    await pool.query(
+      'UPDATE solar_line_items SET tier_key = ?, category = ?, name = ?, default_qty = ?, default_rate = ?, sort_order = ? WHERE id = ?',
+      [item.tier_key, item.category, item.name, item.default_qty, item.default_rate, item.sort_order || 0, item.id]
+    );
+    return item.id;
+  }
+  const [result] = await pool.query(
+    'INSERT INTO solar_line_items (tier_key, category, name, default_qty, default_rate, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+    [item.tier_key, item.category, item.name, item.default_qty, item.default_rate, item.sort_order || 0]
+  );
+  return result.insertId;
+}
+
+async function deleteSolarLineItem(id) {
+  await pool.query('DELETE FROM solar_line_items WHERE id = ?', [id]);
+}
+
 module.exports = {
   getAdminUserByEmail,
   createAdminUser,
+  getActiveAdminSessions,
+  revokeAdminSession,
+  isPhoneBlocked,
+  blockNumber,
+  unblockNumber,
+  getBlockedNumbers,
   getSession,
   upsertSession,
   addMessage,
@@ -354,6 +768,8 @@ module.exports = {
   getMessageByWaId,
   getApiMessages,
   getAllMessages,
+  getAllMessagesForExport,
+  getAnalyticsSummary,
   getMessagesSinceId,
   getSessionsSummary,
   getAllSessionsWithMessages,
@@ -369,4 +785,35 @@ module.exports = {
   savePushSubscription,
   getAllPushSubscriptions,
   deletePushSubscriptionByEndpoint,
+  getSetting,
+  setSetting,
+  replaceProducts,
+  searchProducts,
+  getAllProducts,
+  getProductCount,
+  getTowerFoundationPrices,
+  upsertTowerFoundationPrice,
+  deleteTowerFoundationPrice,
+  getTowerTankPrices,
+  upsertTowerTankPrice,
+  deleteTowerTankPrice,
+  getTowerPackages,
+  upsertTowerPackage,
+  deleteTowerPackage,
+  getDrillingSettings,
+  setDrillingSetting,
+  getDrillingPenetrationRates,
+  upsertDrillingPenetrationRate,
+  deleteDrillingPenetrationRate,
+  getDrillingLineItems,
+  upsertDrillingLineItem,
+  deleteDrillingLineItem,
+  getSolarSettings,
+  setSolarSetting,
+  getSolarKvaTiers,
+  upsertSolarKvaTier,
+  deleteSolarKvaTier,
+  getSolarLineItems,
+  upsertSolarLineItem,
+  deleteSolarLineItem,
 };

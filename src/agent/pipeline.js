@@ -11,9 +11,26 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const SESSION_TTL_MS      = 24 * 60 * 60 * 1000;
 const MAX_LOOP_ITERATIONS = 10;
 
-const processing = new Set(); // phones currently mid-pipeline
+// Serializes pipeline runs per phone so two Claude loops never run concurrently for the same
+// conversation (which would race on session/message state), WITHOUT dropping messages that
+// arrive while a previous one is still in flight. A customer sending two messages seconds apart
+// is normal WhatsApp behavior, not a duplicate — the earlier Set-based "drop if already
+// processing" approach silently lost the second message (never saved, never replied to) instead
+// of queuing it. True webhook retries are already deduped separately by isDuplicate(messageId)
+// in webhook.js, so this only ever needs to order genuinely distinct messages, not filter them.
+const chains = new Map(); // phone -> tail promise of its queued pipeline runs
 
-// ── Domain detection ──────────────────────────────────────────────────────────
+function enqueue(phone, task) {
+  const prev = chains.get(phone) || Promise.resolve();
+  const next = prev.then(task, task).finally(() => {
+    if (chains.get(phone) === next) chains.delete(phone);
+  });
+  chains.set(phone, next);
+  return next;
+}
+
+// ── Domain detection ──────────────────────────────────────────────────────
+
 
 const SOLAR_KEYWORDS    = ['solar', 'panel', 'panels', 'inverter', 'battery', 'electricity',
                            'energy', 'grid', 'power', 'watt', 'kilowatt', 'kw', 'photovoltaic',
@@ -49,9 +66,11 @@ Greet the customer warmly and ask which service they are interested in:
 2. Borehole Drilling Services (new drilling, rehabilitation, water pumping systems)
 
 Once they indicate their interest, proceed as a specialist in that domain.
-Contact: +254 768 117 070 | support@waterliftsolar.africa
+Contact: +254 768 117 070 | info@waterlift.co.ke
 
 Customers may also send photos (electricity meter, appliance nameplate, site photos, existing borehole/pump equipment, etc.) — examine them carefully and use what you see to help identify their service interest.
+
+Customers may also send videos. You cannot actually watch a video — you'll see a system note saying one was received. Never pretend to have watched it. Acknowledge it warmly, mention a team member will review it, and continue the conversation.
 
 Never use markdown headers or emojis. Keep responses short and conversational.`;
 
@@ -70,29 +89,15 @@ const claudeTools = toolDefinitions.map(t => ({
 }));
 
 async function processMessage(from, messageBody, messageId, referral = null, replyToWaId = null) {
-  if (processing.has(from)) {
-    console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
-    return;
-  }
-  processing.add(from);
-  try {
-    await _processMessage(from, messageBody, messageId, referral, replyToWaId);
-  } finally {
-    processing.delete(from);
-  }
+  await enqueue(from, () => _processMessage(from, messageBody, messageId, referral, replyToWaId));
 }
 
 async function processImageMessage(from, media, caption, messageId, replyToWaId = null) {
-  if (processing.has(from)) {
-    console.error('[pipeline] Already processing for', from, '— duplicate message dropped');
-    return;
-  }
-  processing.add(from);
-  try {
-    await _processImageMessage(from, media, caption, messageId, replyToWaId);
-  } finally {
-    processing.delete(from);
-  }
+  await enqueue(from, () => _processImageMessage(from, media, caption, messageId, replyToWaId));
+}
+
+async function processVideoMessage(from, video, caption, messageId, replyToWaId = null) {
+  await enqueue(from, () => _processVideoMessage(from, video, caption, messageId, replyToWaId));
 }
 
 // Looks up the message a customer swiped-to-reply to (if any) and builds a small
@@ -108,9 +113,11 @@ async function buildReplyContext(from, replyToWaId) {
     const textBlock = target.content.find(b => b.type === 'text');
     const docBlock   = target.content.find(b => b.type === 'document');
     const imgBlock    = target.content.find(b => b.type === 'image');
+    const vidBlock    = target.content.find(b => b.type === 'video');
     if (textBlock) preview = textBlock.text;
     else if (docBlock) preview = '📄 ' + docBlock.filename;
     else if (imgBlock) preview = '📷 Photo';
+    else if (vidBlock) preview = '🎥 Video';
   }
   const sender = target.role === 'user' ? 'customer' : (target.source === 'human' ? 'agent' : 'ai');
   return { waMessageId: replyToWaId, preview: String(preview).slice(0, 120), sender };
@@ -139,6 +146,15 @@ async function _processMessage(from, messageBody, messageId, referral = null, re
 
   // Human has taken over — record the customer message but don't respond with AI
   if (session.humanTakeover) {
+    session.lastSeen = now;
+    await db.addMessage(from, 'user', messageBody, null, now, messageId, replyContext);
+    await db.upsertSession(from, session);
+    return;
+  }
+
+  // Number is blocked — still log the message (so the admin can see they keep messaging) but
+  // never let the AI reply, same effect as human takeover, until explicitly unblocked.
+  if (await db.isPhoneBlocked(from)) {
     session.lastSeen = now;
     await db.addMessage(from, 'user', messageBody, null, now, messageId, replyContext);
     await db.upsertSession(from, session);
@@ -230,6 +246,77 @@ async function _processImageMessage(from, media, caption, messageId, replyToWaId
     return;
   }
 
+  // Number is blocked — still log the image but never let the AI reply
+  if (await db.isPhoneBlocked(from)) {
+    session.lastSeen = now;
+    await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
+    await db.upsertSession(from, session);
+    return;
+  }
+
+  if (caption) {
+    const detected = detectDomain(caption);
+    if (detected) session.domain = detected;
+  }
+
+  session.lastSeen = now;
+  await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
+  await db.upsertSession(from, session);
+
+  await sendTypingIndicator(from, messageId);
+
+  const systemPrompt = getSystemPrompt(session.domain);
+  await runAgenticLoop(from, session, systemPrompt);
+}
+
+// Customer sent a video. Claude has no native video-understanding input (unlike images), so
+// the file is stored (viewable in the admin dashboard, same as documents) and the session is
+// flagged escalated so a human actually watches it — db.sanitizeForClaude swaps the stored
+// `video` block for a plain text marker before it ever reaches the Claude API, and the system
+// prompts tell Claude to acknowledge it honestly rather than pretend to have seen it.
+async function _processVideoMessage(from, video, caption, messageId, replyToWaId = null) {
+  const now = Date.now();
+  const replyContext = await buildReplyContext(from, replyToWaId);
+
+  let session = await db.getSession(from);
+
+  if (!session || now - session.lastSeen > SESSION_TTL_MS) {
+    session = { domain: null, lastSeen: now, escalated: false, humanTakeover: false };
+    await db.upsertSession(from, session);
+    const dateStr = new Date().toLocaleDateString('en-KE', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+    await db.addMessage(from, 'user',
+      `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
+      'system', now);
+    await db.addMessage(from, 'assistant',
+      [{ type: 'text', text: 'Understood.' }],
+      'system', now);
+  }
+
+  const contentBlocks = [
+    { type: 'video', storedAs: video.storedAs, mimeType: video.mimeType, filename: video.filename },
+  ];
+  if (caption) contentBlocks.push({ type: 'text', text: caption });
+
+  session.escalated = true; // a video needs a human to actually watch it
+
+  // Human has taken over — record the customer's video but don't respond with AI
+  if (session.humanTakeover) {
+    session.lastSeen = now;
+    await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
+    await db.upsertSession(from, session);
+    return;
+  }
+
+  // Number is blocked — still log the video but never let the AI reply
+  if (await db.isPhoneBlocked(from)) {
+    session.lastSeen = now;
+    await db.addMessage(from, 'user', contentBlocks, null, now, messageId, replyContext);
+    await db.upsertSession(from, session);
+    return;
+  }
+
   if (caption) {
     const detected = detectDomain(caption);
     if (detected) session.domain = detected;
@@ -269,6 +356,27 @@ async function runAgenticLoop(from, session, systemPrompt) {
     const assistantMsgId = await db.addMessage(from, 'assistant', response.content, null, Date.now());
 
     if (response.stop_reason === 'end_turn' || response.stop_reason === 'max_tokens') {
+      // response.content can still contain tool_use blocks here — e.g. Claude hit the
+      // max_tokens cap mid-tool-call, or (defensively) end_turn arrived alongside a tool call.
+      // We just saved the FULL content (including those blocks) to history above, so if we
+      // stopped the loop here without resolving them, they'd sit in the DB as a tool_use with no
+      // matching tool_result forever — and Claude's API rejects ANY future call for this
+      // conversation outright (400: "tool_use ids were found without tool_result blocks") until
+      // enough later messages push the orphaned pair out of the trimmed history window. Always
+      // synthesize a tool_result for any leftover tool_use before breaking, so the invariant
+      // "every tool_use is immediately followed by tool_result" never gets violated.
+      const orphanedToolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+      if (orphanedToolUseBlocks.length) {
+        console.error('[pipeline]', orphanedToolUseBlocks.length, 'tool_use block(s) left unresolved at stop_reason', response.stop_reason, '— synthesizing tool_result to keep history valid');
+        const orphanResultContent = orphanedToolUseBlocks.map(block => ({
+          type:        'tool_result',
+          tool_use_id: block.id,
+          content:     'Response was truncated before this tool call could complete — it was not executed.',
+          is_error:    true,
+        }));
+        await db.addMessage(from, 'user', orphanResultContent, null, Date.now());
+      }
+
       const text = response.content
         .filter(b => b.type === 'text')
         .map(b => b.text)
@@ -379,4 +487,20 @@ async function appendAdminDocumentMessage(phone, filename, caption, storedAs, wa
   return id;
 }
 
-module.exports = { processMessage, processImageMessage, pauseSession, resumeSession, appendAdminMessage, appendAdminDocumentMessage };
+// Deliberately has no `source` field (unlike a customer-sent image block, which carries real
+// base64 image data for Claude to analyze) — this distinguishes an admin-sent photo from
+// Claude's reserved `image` content-block schema. See db.js's sanitizeForClaude for why that
+// distinction matters.
+async function appendAdminImageMessage(phone, filename, caption, storedAs, waMessageId = null, replyContext = null) {
+  let s = await db.getSession(phone);
+  if (!s) {
+    s = { domain: null, lastSeen: Date.now(), escalated: false, humanTakeover: true };
+    await db.upsertSession(phone, s);
+  }
+  const id = await db.addMessage(phone, 'assistant', [{ type: 'image', filename, caption: caption || null, storedAs: storedAs || null }], 'human', Date.now(), waMessageId, replyContext);
+  s.lastSeen = Date.now();
+  await db.upsertSession(phone, s);
+  return id;
+}
+
+module.exports = { processMessage, processImageMessage, processVideoMessage, pauseSession, resumeSession, appendAdminMessage, appendAdminDocumentMessage, appendAdminImageMessage };

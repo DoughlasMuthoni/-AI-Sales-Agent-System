@@ -166,6 +166,21 @@ async function sendDocumentMessage(to, mediaId, filename, caption, contextMessag
   });
 }
 
+// Sends a previously-uploaded image (see uploadMedia) to a customer as an inline photo,
+// not a downloadable file attachment — this is what distinguishes it from sendDocumentMessage.
+async function sendImageMessage(to, mediaId, caption, contextMessageId) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
+  return post(phoneNumberId, accessToken, {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'image',
+    image: { id: mediaId, ...(caption ? { caption } : {}) },
+    ...(contextMessageId ? { context: { message_id: contextMessageId } } : {}),
+  });
+}
+
 // In-memory cache for product names — avoids a catalog API call on every order for the same product
 const _productNameCache = new Map();
 
@@ -199,4 +214,4 @@ async function lookupProductNames(retailerIds) {
   return names;
 }
 
-module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage, lookupProductNames, downloadMedia, uploadMedia, sendDocumentMessage };
+module.exports = { sendTextMessage, sendTypingIndicator, sendCatalogMessage, sendProductMessage, sendProductListMessage, lookupProductNames, downloadMedia, uploadMedia, sendDocumentMessage, sendImageMessage };

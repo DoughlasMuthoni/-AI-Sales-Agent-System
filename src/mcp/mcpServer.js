@@ -100,7 +100,7 @@ function matchTowerPackage(packages, height, count, tank_type, capKey) {
     : candidates.find(p => capKey && p.capacityKey === capKey);
 }
 
-async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location) {
+async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location, structure_only) {
   const { foundationPrices, tankPrices, packages } = await loadTowerPricing();
   const height = Number(tower_height_m) || null;
   const count  = Number(tank_count) || null;
@@ -109,6 +109,14 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
   const pkg = matchTowerPackage(packages, height, count, tank_type, capKey);
 
   if (pkg) {
+    if (structure_only) {
+      return (
+        `Steel structure/fabrication price ONLY (excludes foundation and tank) for a ${pkg.height}m elevated steel water tower${location ? ' (' + location + ')' : ''}:\n` +
+        `💰 KShs ${pkg.fabricationPrice.toLocaleString()}\n\n` +
+        `This is the tower structure alone — foundation and tank are priced separately (ask for the complete package price to see the full installed total). ` +
+        `Final price is confirmed after a site visit. Prices valid 30 days.`
+      );
+    }
     const foundationPrice = foundationPrices[pkg.foundation.toLowerCase()];
     const tankInfo = tankPrices[`${pkg.tankType}:${pkg.capacityKey}`];
     const total = pkg.fabricationPrice + foundationPrice + tankInfo.price * pkg.tankCount;
@@ -135,6 +143,20 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
   );
 
   if (candidates.length) {
+    if (structure_only) {
+      const fabTotals = candidates.map(p => p.fabricationPrice);
+      const fabMin = Math.min(...fabTotals);
+      const fabMax = Math.max(...fabTotals);
+      const knownBits = [
+        height ? `${height}m height` : null,
+        tank_type ? `${TANK_TYPE_DISPLAY[tank_type] || tank_type} tank` : null,
+      ].filter(Boolean).join(', ');
+      return (
+        `Steel structure/fabrication price ONLY (excludes foundation and tank)${knownBits ? ' (' + knownBits + ')' : ''}${location ? ' — ' + location : ''}:\n` +
+        `💰 KShs ${fabMin.toLocaleString()}${fabMin === fabMax ? '' : ' – KShs ' + fabMax.toLocaleString()}\n\n` +
+        `This is the tower structure alone — foundation and tank are priced separately. Prices valid 30 days.`
+      );
+    }
     const totals = candidates.map(p => {
       const fp = foundationPrices[p.foundation.toLowerCase()];
       const ti = tankPrices[`${p.tankType}:${p.capacityKey}`];
@@ -281,7 +303,7 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
     `Borehole drilling cost depends heavily on your specific site — depth, ground geology, and distance from our base all affect the price, so a number given in chat here could be significantly off. ` +
     `What I can do is get one of our drilling engineers to review your location and prepare an accurate written quote for you.\n\n` +
     `Let's book that — use schedule_callback, or share your location${property_type ? ' and confirm this is for a ' + property_type + ' property' : ''} and I'll arrange it. ` +
-    `Contact: +254 768 117 070 | support@waterliftsolar.africa`
+    `Contact: +254 768 117 070 | info@waterlift.co.ke`
   );
 }
 
@@ -309,14 +331,14 @@ const toolHandlers = {
   async send_quote(input) {
     const {
       service, system_size_kw, borehole_depth_m, location, property_type, system_type, is_rehabilitation,
-      is_tower_quote, tower_height_m, tank_count, tank_type, tank_capacity,
+      is_tower_quote, tower_height_m, tank_count, tank_type, tank_capacity, structure_only,
     } = input;
     if (service === 'solar') return await getSolarQuote(system_size_kw, location, property_type, system_type);
     if (service === 'borehole') {
-      if (is_tower_quote) return await getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location);
+      if (is_tower_quote) return await getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacity, location, structure_only);
       return getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabilitation);
     }
-    return 'Unable to generate a quote — please contact us at +254 768 117 070 or support@waterliftsolar.africa';
+    return 'Unable to generate a quote — please contact us at +254 768 117 070 or info@waterlift.co.ke';
   },
 
   async show_products(input) {
@@ -391,7 +413,7 @@ const toolHandlers = {
   async escalate_to_human(input) {
     const record = { ...input, escalatedAt: new Date().toISOString() };
     await db.insertEscalation(record);
-    console.error('[MCP] ESCALATION:', input.customer_name, input.urgency);
+    console.error('[MCP] ESCALATION:', input.customer_name || '(no name given)', input.urgency);
     sendEscalationNotification(record);
     const urgencyMsg = input.urgency === 'high'
       ? 'A team member will contact you as soon as possible.'
