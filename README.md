@@ -125,7 +125,7 @@ NOTIFICATION_EMAIL=
 # Web push notifications (admin dashboard PWA) — generate with: npx web-push generate-vapid-keys
 VAPID_PUBLIC_KEY=
 VAPID_PRIVATE_KEY=
-VAPID_SUBJECT=mailto:info@waterlift.co.ke
+VAPID_SUBJECT=mailto:githuiddoughlas8@gmail.com
 
 # Optional — how many days to keep files in data/uploads/ before scripts/cleanup-uploads-cron.js
 # deletes them. Defaults to 180 (~6 months) if not set.
@@ -391,8 +391,5 @@ See `CLAUDE.md` for full specifications. Summary:
 
 ## Useful Links
 
-- WhatsApp Business number: dedicated AI agent line (separate from the sales team number)
-- Company website: [waterliftsolar.africa](https://waterliftsolar.africa)
-- Shop: [waterliftsolar.africa/shop](https://waterliftsolar.africa/shop)
-- Support: info@waterlift.co.ke | +254 768 117 070
-- Offices: Nairobi (Baba Dogo) and Nanyuki (Laikipia)
+- Website: [doughlasgithuiportfolio.kesug.com](https://doughlasgithuiportfolio.kesug.com)
+- Contact: githuiddoughlas8@gmail.com | 0707264913
