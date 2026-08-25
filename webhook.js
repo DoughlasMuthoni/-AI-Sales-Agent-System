@@ -15,6 +15,9 @@ const { generateTowerQuotePDF, generateDrillingQuotePDF, generateSolarQuotePDF }
 const { generateDrillingQuote } = require('./src/services/drillingCalc.js');
 const { generateSolarQuote } = require('./src/services/solarQuote.js');
 const { normalizePhone } = require('./src/utils/phone.js');
+const { extractMessageText, senderLabel } = require('./src/utils/messageText.js');
+const { generateFullReport } = require('./src/services/conversationAnalysis.js');
+const { generateConversationAnalysisPDF } = require('./src/services/analysisPdf.js');
 
 // Matches mcpServer.js's normalizeCapacityKey — keeps admin-entered capacity keys (e.g. "50m3",
 // "50 M3", "50M³") consistent with what the chat tool's lookups expect.
@@ -137,13 +140,15 @@ function loginPage(error) {
 <link rel="icon" href="/icons/favicon.png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <style>
+:root{--bg:#f0f4f8;--card:#fff;--text:#111;--label:#334155;--border:#cbd5e1}
+@media(prefers-color-scheme:dark){:root{--bg:#0a0f1a;--card:#131b2b;--text:#e8edf5;--label:#c3cee0;--border:#34455f}}
 *{box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f4f8;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{background:#fff;border-radius:16px;padding:36px 32px;box-shadow:0 6px 28px rgba(0,0,0,.10);max-width:360px;width:100%;text-align:center}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:var(--card);border-radius:16px;padding:36px 32px;box-shadow:0 6px 28px rgba(0,0,0,.10);max-width:360px;width:100%;text-align:center}
 .card .login-logo{max-width:220px;width:100%;height:auto;margin:0 0 22px}
 .card form{text-align:left}
-label{display:block;margin-bottom:14px;font-size:.85rem;font-weight:600;color:#334155}
-input{width:100%;padding:10px 12px;margin-top:5px;font-family:inherit;font-size:.9rem;border:1.5px solid #cbd5e1;border-radius:8px;color:#111}
+label{display:block;margin-bottom:14px;font-size:.85rem;font-weight:600;color:var(--label)}
+input{width:100%;padding:10px 12px;margin-top:5px;font-family:inherit;font-size:.9rem;border:1.5px solid var(--border);border-radius:8px;color:var(--text);background:var(--card)}
 input:focus{outline:none;border-color:#075E54}
 button{width:100%;background:#075E54;color:#fff;border:none;border-radius:8px;padding:11px;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:4px}
 button:hover{background:#054a3a}
@@ -291,7 +296,7 @@ function renderMessages(messages, paused) {
       const src = 'data:' + (imgBlock.source?.media_type || 'image/jpeg') + ';base64,' + (imgBlock.source?.data || '');
       return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in wa-img-bubble">' +
         quote +
-        '<img class="wa-img" src="' + src + '" alt="Photo from customer" loading="lazy"/>' +
+        '<img class="wa-img" src="' + src + '" alt="Photo from customer" loading="lazy" onclick="openLightbox(this.src)"/>' +
         (capBlock ? '<div class="wa-img-cap">' + esc(capBlock.text) + '</div>' : '') +
         '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, '📷 Photo', 'customer', paused) + '</div>';
     }
@@ -400,12 +405,24 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
         const domain  = s.domain || 'general';
         const paused  = !!s.humanTakeover;
         const blocked = blockedSet.has(phone);
+        const lead    = leadMap[phone];
+        // Full-conversation search index, not just the latest preview line — the admin should be
+        // able to find a chat by the customer's captured name or anything said earlier in it, not
+        // only by phone number or whatever happens to be the most recent message. All of this
+        // text is already sent to the browser anyway (every conversation's full history is
+        // pre-rendered into its own #chat-{pid} pane on load), so this just makes it searchable.
+        const convoText = (s.messages || [])
+          .filter(m => m.source !== 'system')
+          .map(m => extractMessageText(m.content))
+          .join(' ');
+        const searchBlob = [phone, lead && lead.name, convoText].filter(Boolean).join(' ');
+        const displayName = lead && lead.name ? lead.name + ' (' + phone + ')' : phone;
         return (
-          '<div class="wa-contact" id="contact-' + pid + '" data-phone="' + esc(phone) + '" data-domain="' + domain + '" onclick="openChat(\'' + pid + '\')">' +
+          '<div class="wa-contact" id="contact-' + pid + '" data-phone="' + esc(phone) + '" data-domain="' + domain + '" data-search="' + esc(searchBlob) + '" onclick="openChat(\'' + pid + '\')">' +
             '<div class="wa-av wa-av-' + domain + '">' + getInitials(phone) + '</div>' +
             '<div class="wa-ct-info">' +
               '<div class="wa-ct-row1">' +
-                '<span class="wa-ct-name">' + esc(phone) + '</span>' +
+                '<span class="wa-ct-name" title="' + esc(phone) + '">' + esc(displayName) + '</span>' +
                 '<span class="wa-ct-time">' + timeAgo(s.lastSeen) + '</span>' +
               '</div>' +
               '<div class="wa-ct-row2">' +
@@ -482,10 +499,12 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
     );
   }).join('');
 
-  // Tables for leads / callbacks / escalations
-  const tbl = (cols, rows, emptyIcon, emptyText) => rows.length === 0
+  // Tables for leads / callbacks / escalations. extraClass is optional — pass 'tbl-cards' to
+  // get the mobile card-reflow treatment below (only worth adding to a table whose <td>s also
+  // carry matching data-label attributes; the other tbl() callers below don't need it).
+  const tbl = (cols, rows, emptyIcon, emptyText, extraClass) => rows.length === 0
     ? '<div class="tbl-empty"><div>' + emptyIcon + '</div><p>' + emptyText + '</p></div>'
-    : '<div class="tbl-wrap"><table><thead><tr>' + cols.map(c=>'<th>'+c+'</th>').join('') + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+    : '<div class="tbl-wrap' + (extraClass ? ' ' + extraClass : '') + '"><table><thead><tr>' + cols.map(c=>'<th>'+c+'</th>').join('') + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 
   function statusDropdown(index, current) {
     const opts = ['new','contacted','converted','lost'];
@@ -499,17 +518,17 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
     leads.map(l => {
       const status = l.status || 'new';
       return '<tr>' +
-        '<td class="nowrap">' + statusDropdown(l.id, status) + '</td>' +
-        '<td class="nowrap"><strong>' + esc(l.name) + '</strong></td>' +
-        '<td class="mono nowrap"><span class="cell-flex">' + esc(l.phone) +
+        '<td class="nowrap" data-label="Status">' + statusDropdown(l.id, status) + '</td>' +
+        '<td class="nowrap" data-label="Name"><strong>' + esc(l.name) + '</strong></td>' +
+        '<td class="mono nowrap" data-label="Phone"><span class="cell-flex">' + esc(l.phone) +
           '<button type="button" class="copy-btn" data-copy="' + esc(l.phone) + '" onclick="copyToClipboard(this)" title="Copy phone number">&#128203;</button></span></td>' +
-        '<td class="nowrap"><span class="chip chip-' + esc(l.service) + '">' + esc(l.service) + '</span></td>' +
-        '<td class="wrap-cell">' + esc(l.location) + '</td><td class="nowrap">' + esc(l.property_type) + '</td>' +
-        '<td class="nowrap">' + esc(l.estimated_budget||'—') + '</td>' +
-        '<td class="wrap-cell"><div class="cell-flex"><span class="notes-cell" onclick="toggleNotes(this)" title="Click to expand/collapse">' + esc(l.notes||'—') + '</span>' +
+        '<td class="nowrap" data-label="Service"><span class="chip chip-' + esc(l.service) + '">' + esc(l.service) + '</span></td>' +
+        '<td class="wrap-cell" data-label="Location">' + esc(l.location) + '</td><td class="nowrap" data-label="Property">' + esc(l.property_type) + '</td>' +
+        '<td class="nowrap" data-label="Budget">' + esc(l.estimated_budget||'—') + '</td>' +
+        '<td class="wrap-cell" data-label="Notes"><div class="cell-flex"><span class="notes-cell" onclick="toggleNotes(this)" title="Click to expand/collapse">' + esc(l.notes||'—') + '</span>' +
           (l.notes ? '<button type="button" class="copy-btn" data-copy="' + esc(l.notes) + '" onclick="copyToClipboard(this)" title="Copy notes">&#128203;</button>' : '') +
           '</div></td>' +
-        '<td class="muted nowrap">' + fmtFull(l.captured_at) + '</td>' +
+        '<td class="muted nowrap" data-label="Captured">' + fmtFull(l.captured_at) + '</td>' +
         '<td class="nowrap">' +
           '<button type="button" class="resolve-btn" ' +
             'data-id="' + l.id + '" data-name="' + esc(l.name) + '" data-phone="' + esc(l.phone) + '" ' +
@@ -526,32 +545,35 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
             'data-name="' + esc(l.name) + '" data-phone="' + esc(l.phone) + '" ' +
             'onclick="openSolarQuoteModal(this)">Solar Quote</button>' +
         '</td></tr>';
-    }).join(''), '&#127919;', 'No leads captured yet.');
+    }).join(''), '&#127919;', 'No leads captured yet.', 'tbl-cards');
 
   const cbHTML = tbl(
     ['Name','Phone','Date','Time','Notes','Booked At'],
     callbacks.map(c =>
-      '<tr><td class="nowrap"><strong>' + esc(c.name) + '</strong></td>' +
-      '<td class="mono nowrap">' + esc(c.phone) + '</td>' +
-      '<td class="nowrap">' + esc(c.preferred_date) + '</td><td class="nowrap">' + esc(c.preferred_time) + '</td>' +
-      '<td class="wrap-cell">' + esc(c.notes||'—') + '</td>' +
-      '<td class="muted nowrap">' + fmtFull(c.booked_at) + '</td></tr>'
-    ).join(''), '&#128197;', 'No callbacks booked yet.');
+      '<tr><td class="nowrap" data-label="Name"><strong>' + esc(c.name) + '</strong></td>' +
+      '<td class="mono nowrap" data-label="Phone">' + esc(c.phone) + '</td>' +
+      '<td class="nowrap" data-label="Date">' + esc(c.preferred_date) + '</td><td class="nowrap" data-label="Time">' + esc(c.preferred_time) + '</td>' +
+      '<td class="wrap-cell" data-label="Notes">' + esc(c.notes||'—') + '</td>' +
+      '<td class="muted nowrap" data-label="Booked At">' + fmtFull(c.booked_at) + '</td></tr>'
+    ).join(''), '&#128197;', 'No callbacks booked yet.', 'tbl-cards');
 
   const urgCls = u => u==='high'?'danger':u==='medium'?'warning':'general';
   const escTbl = tbl(
-    ['Customer','Urgency','Reason','Time','Action'],
+    ['Customer','Phone','Urgency','Reason','Time','Action'],
     escalations.map(e =>
       '<tr' + (e.resolved ? ' class="esc-resolved"' : '') + '>' +
-      '<td class="nowrap"><strong>' + esc(e.customer_name||'Unknown') + '</strong></td>' +
-      '<td class="nowrap"><span class="chip chip-' + urgCls(e.urgency) + '">' + esc(e.urgency) + '</span></td>' +
-      '<td class="wrap-cell">' + esc(e.reason) + '</td>' +
-      '<td class="muted nowrap">' + fmtFull(e.escalated_at) + '</td>' +
-      '<td>' + (e.resolved
+      '<td class="nowrap" data-label="Customer"><strong>' + esc(e.customer_name||'Unknown') + '</strong></td>' +
+      '<td class="mono nowrap" data-label="Phone">' + (e.phone
+        ? '<span class="cell-flex">' + esc(e.phone) + '<button type="button" class="copy-btn" data-copy="' + esc(e.phone) + '" onclick="copyToClipboard(this)" title="Copy phone number">&#128203;</button></span>'
+        : '—') + '</td>' +
+      '<td class="nowrap" data-label="Urgency"><span class="chip chip-' + urgCls(e.urgency) + '">' + esc(e.urgency) + '</span></td>' +
+      '<td class="wrap-cell" data-label="Reason">' + esc(e.reason) + '</td>' +
+      '<td class="muted nowrap" data-label="Time">' + fmtFull(e.escalated_at) + '</td>' +
+      '<td data-label="Action">' + (e.resolved
         ? '<span class="resolved-badge">&#10003; Resolved</span>'
         : '<button class="resolve-btn" data-id="' + e.id + '" onclick="handleResolveEscalation(this)">Resolve</button>') + '</td>' +
       '</tr>'
-    ).join(''), '&#128680;', 'No escalations yet.');
+    ).join(''), '&#128680;', 'No escalations yet.', 'tbl-cards');
 
   // ── Tower pricing tables ──────────────────────────────────────────────────
   const towerFoundationHTML = tbl(
@@ -723,6 +745,11 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
       '<div class="stat s-cb"><div class="stat-n">' + analytics.messagesPerConversation.withLead.avgMessages + '</div><div class="stat-sub">vs ' + analytics.messagesPerConversation.withoutLead.avgMessages + ' without a lead</div><div class="stat-l">&#128172; Avg Messages (Converted)</div></div>' +
     '</div>' +
     '<div class="pane-scroll">' +
+      '<div class="pane-toolbar" style="align-items:center">' +
+        '<button class="export-btn" type="button" id="genAnalysisBtn" onclick="generateAnalysisReport()">&#129302; Generate Conversation Analysis Report (AI)</button>' +
+        '<span id="genAnalysisStatus" class="muted" style="font-size:.85rem"></span>' +
+      '</div>' +
+      '<p class="muted" style="margin:4px 0 16px;font-size:.8rem">Reads every conversation to date, has Claude write findings and recommendations with real transcript examples, and downloads a branded PDF. Takes 30–60 seconds.</p>' +
       '<h3 style="margin:16px 0 8px">Leads by Status</h3>' +
       leadsByStatusHTML +
       '<h3 style="margin:24px 0 8px">Domain Split</h3>' +
@@ -739,6 +766,14 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Applies the saved/system theme before first paint, so there's no flash of the wrong theme
+     while the stylesheet below loads. Must stay inline and this early in <head>. -->
+<script>(function(){
+  try {
+    var saved = localStorage.getItem('waterlift-theme');
+    if (saved === 'dark' || saved === 'light') document.documentElement.setAttribute('data-theme', saved);
+  } catch (e) {}
+})();</script>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Waterlift Admin</title>
 <link rel="icon" href="/icons/favicon.png">
@@ -752,8 +787,59 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Waterlift Admin">
 <style>
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   Brand colors (teal/green) and status/domain badge colors stay constant across
+   themes on purpose — only page/panel surfaces, body text, and borders adapt.
+   Light values live on bare :root; dark values apply automatically by system
+   preference, or explicitly via [data-theme] once the admin picks one in the
+   topbar toggle (which wins over system preference either direction). */
+:root{
+  --bg-0:#f0f4f8; --bg-1:#fff; --bg-2:#f0f2f5; --bg-3:#f1f5f9;
+  --text-1:#111; --text-2:#64748b; --text-3:#94a3b8;
+  --border-1:#e2e8f0; --border-2:#cbd5e1;
+  --hover-success-bg:#dcfce7;
+  --modal-overlay-bg:rgba(15,23,42,.5);
+  --wa-wallpaper:#ECE5DD;
+  --wa-wallpaper-pattern:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  --wa-bubble-in:#fff; --wa-bubble-out:#DCF8C6; --wa-bubble-human:#C8F7DC;
+  --wa-sender:#075E54; --wa-sender-human:#16a34a; --wa-sender-in:#475569;
+  --wa-timestamp:rgba(0,0,0,.38);
+  --wa-overlay-fill:rgba(0,0,0,.06); --wa-overlay-fill-strong:rgba(0,0,0,.12);
+  --wa-system-text:#475569;
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg-0:#0a0f1a; --bg-1:#131b2b; --bg-2:#101826; --bg-3:#1b2536;
+    --text-1:#e8edf5; --text-2:#93a4bd; --text-3:#64758f;
+    --border-1:#253247; --border-2:#34455f;
+    --hover-success-bg:rgba(37,211,102,.15);
+    --modal-overlay-bg:rgba(0,0,0,.65);
+    --wa-wallpaper:#0b141a;
+    --wa-wallpaper-pattern:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    --wa-bubble-in:#1f2c34; --wa-bubble-out:#005c4b; --wa-bubble-human:#0b4a3f;
+    --wa-sender:#34d399; --wa-sender-human:#4ade80; --wa-sender-in:#b8c4d6;
+    --wa-timestamp:rgba(255,255,255,.45);
+    --wa-overlay-fill:rgba(255,255,255,.08); --wa-overlay-fill-strong:rgba(255,255,255,.16);
+    --wa-system-text:#cbd5e1;
+  }
+}
+:root[data-theme="dark"]{
+  --bg-0:#0a0f1a; --bg-1:#131b2b; --bg-2:#101826; --bg-3:#1b2536;
+  --text-1:#e8edf5; --text-2:#93a4bd; --text-3:#64758f;
+  --border-1:#253247; --border-2:#34455f;
+  --hover-success-bg:rgba(37,211,102,.15);
+  --modal-overlay-bg:rgba(0,0,0,.65);
+  --wa-wallpaper:#0b141a;
+  --wa-wallpaper-pattern:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  --wa-bubble-in:#1f2c34; --wa-bubble-out:#005c4b; --wa-bubble-human:#0b4a3f;
+  --wa-sender:#34d399; --wa-sender-human:#4ade80; --wa-sender-in:#b8c4d6;
+  --wa-timestamp:rgba(255,255,255,.45);
+  --wa-overlay-fill:rgba(255,255,255,.08); --wa-overlay-fill-strong:rgba(255,255,255,.16);
+  --wa-system-text:#cbd5e1;
+}
+
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f4f8;color:#111;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg-0);color:var(--text-1);height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
 
 /* ── Top bar ── */
 .topbar{background:linear-gradient(135deg,#054a3a,#075E54);color:#fff;padding:8px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;row-gap:8px;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.25)}
@@ -779,12 +865,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 }
 
 /* ── Stats ── */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:7px 16px;background:#fff;border-bottom:1px solid #e2e8f0;flex-shrink:0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:7px 16px;background:var(--bg-1);border-bottom:1px solid var(--border-1);flex-shrink:0}
 .stats.stats-hidden{display:none}
 @media(max-width:640px){.stats{grid-template-columns:repeat(2,1fr);padding:6px 12px}}
 .stat{text-align:center;padding:4px}
 .stat-n{font-size:1.2rem;font-weight:700;line-height:1}
-.stat-l{font-size:.65rem;color:#64748b;margin-top:2px;font-weight:500}
+.stat-l{font-size:.65rem;color:var(--text-2);margin-top:2px;font-weight:500}
 .s-conv .stat-n{color:#075E54} .s-leads .stat-n{color:#d97706}
 .s-cb .stat-n{color:#dc2626} .s-esc .stat-n{color:#8b5cf6}
 
@@ -794,6 +880,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .tab{padding:8px 20px;border:none;background:transparent;color:rgba(255,255,255,.65);cursor:pointer;font-size:.85rem;font-weight:500;white-space:nowrap;border-bottom:3px solid transparent;transition:all .15s}
 .tab:hover{color:#fff;background:rgba(255,255,255,.08)}
 .tab.active{color:#fff;border-bottom-color:#25D366;background:rgba(255,255,255,.1)}
+.tab-dropdown{position:relative;display:inline-flex;flex-shrink:0}
+.tab-dropdown-menu{position:fixed;min-width:200px;background:var(--bg-1);border:1px solid var(--border-1);border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.2);padding:6px;display:none;flex-direction:column;gap:1px;z-index:1500}
+.tab-dropdown-menu.open{display:flex}
+.tab-dropdown-menu button{background:none;border:none;text-align:left;padding:9px 11px;border-radius:6px;cursor:pointer;font-size:.85rem;color:var(--text-1);white-space:nowrap;font-family:inherit}
+.tab-dropdown-menu button:hover{background:var(--bg-2)}
+.tab-dropdown-menu button.pricing-item-active{font-weight:700;color:#075E54}
 
 /* ── Panes ── */
 .pane{display:none;flex:1;overflow:hidden;min-height:0}
@@ -801,8 +893,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .pane-scroll{flex:1;overflow-y:auto;padding:16px}
 
 /* ── WhatsApp layout ── */
-.wa-layout{display:flex;flex:1;overflow:hidden;min-height:0;background:#fff}
-.wa-left{width:360px;min-width:280px;border-right:1px solid #e2e8f0;display:flex;flex-direction:column;background:#fff;flex-shrink:0}
+.wa-layout{display:flex;flex:1;overflow:hidden;min-height:0;background:var(--bg-1)}
+.wa-left{width:360px;min-width:280px;border-right:1px solid var(--border-1);display:flex;flex-direction:column;background:var(--bg-1);flex-shrink:0}
 @media(max-width:768px){
   .wa-left{width:100%;min-width:0}
   .wa-left.wa-hidden{display:none}
@@ -816,15 +908,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .wa-lcount{background:rgba(255,255,255,.2);border-radius:12px;padding:2px 8px;font-size:.75rem}
 
 /* Search */
-.wa-search{padding:8px 12px;background:#f0f2f5;border-bottom:1px solid #e2e8f0;flex-shrink:0}
-.wa-search input{width:100%;border:none;background:#fff;padding:8px 14px;border-radius:20px;font-size:.85rem;outline:none;color:#111;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.wa-search{padding:8px 12px;background:var(--bg-2);border-bottom:1px solid var(--border-1);flex-shrink:0}
+.wa-search input{width:100%;border:none;background:var(--bg-1);padding:8px 14px;border-radius:20px;font-size:.85rem;outline:none;color:var(--text-1);box-shadow:0 1px 2px rgba(0,0,0,.08)}
 .wa-search input:focus{box-shadow:0 0 0 2px rgba(7,94,84,.2)}
 
 /* Contacts */
 .wa-contacts{flex:1;overflow-y:auto}
-.wa-contact{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .1s}
-.wa-contact:hover,.wa-contact.active{background:#f0f2f5}
-.wa-empty-contacts{padding:40px 20px;text-align:center;color:#94a3b8;font-size:.875rem}
+.wa-contact{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--border-1);transition:background .1s}
+.wa-contact:hover,.wa-contact.active{background:var(--bg-2)}
+.wa-empty-contacts{padding:40px 20px;text-align:center;color:var(--text-3);font-size:.875rem}
 
 /* Avatars */
 .wa-av{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85rem;font-weight:700;color:#fff;flex-shrink:0;text-transform:uppercase}
@@ -839,16 +931,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .wa-ct-name{font-size:.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;margin-right:8px}
 .wa-ct-time{font-size:.72rem;color:#128C7E;flex-shrink:0;font-weight:500}
 .wa-ct-row2{display:flex;align-items:center;gap:6px}
-.wa-ct-prev{font-size:.8rem;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.wa-ct-prev{font-size:.8rem;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 .wa-ct-badge{font-size:.85rem;flex-shrink:0}
-.wa-unread-dot{width:10px;height:10px;background:#25D366;border-radius:50%;flex-shrink:0;box-shadow:0 0 0 2px #e8f5e9}
+.wa-unread-dot{width:10px;height:10px;background:#25D366;border-radius:50%;flex-shrink:0;box-shadow:0 0 0 2px var(--bg-1)}
 .wa-domain-chip,.wa-chip-solar,.wa-chip-borehole,.wa-chip-general{font-size:.65rem;padding:1px 6px;border-radius:8px;font-weight:600;flex-shrink:0}
 .wa-chip-solar{background:#fef3c7;color:#92400e}
 .wa-chip-borehole{background:#dbeafe;color:#1e40af}
 .wa-chip-general{background:#e2e8f0;color:#475569}
 
 /* Right: no-chat */
-.wa-no-chat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f0f2f5;color:#94a3b8;text-align:center;padding:40px}
+.wa-no-chat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg-2);color:var(--text-3);text-align:center;padding:40px}
 .wa-no-chat-icon{font-size:3rem;margin-bottom:12px;opacity:.4}
 .wa-no-chat p{font-size:.9rem}
 
@@ -874,8 +966,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 /* Messages area */
 .wa-msgs{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:4px;
-  background-color:#ECE5DD;
-  background-image:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  background-color:var(--wa-wallpaper);
+  background-image:var(--wa-wallpaper-pattern);
 }
 
 /* Message rows */
@@ -887,57 +979,63 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 /* Bubbles */
 .wa-bubble{max-width:72%;padding:8px 12px 22px;border-radius:8px;font-size:.875rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;position:relative;box-shadow:0 1px 2px rgba(0,0,0,.12)}
 @media(max-width:480px){.wa-bubble{max-width:88%}}
-.wa-in{background:#fff;border-radius:0 8px 8px 8px}
-.wa-in::before{content:'';position:absolute;left:-7px;top:0;border:7px solid transparent;border-right-color:#fff;border-top-color:#fff}
-.wa-out{background:#DCF8C6;border-radius:8px 0 8px 8px}
-.wa-out::after{content:'';position:absolute;right:-7px;top:0;border:7px solid transparent;border-left-color:#DCF8C6;border-top-color:#DCF8C6}
-.wa-human{background:#C8F7DC}
-.wa-human::after{border-left-color:#C8F7DC;border-top-color:#C8F7DC}
-.wa-sender{display:block;font-size:.68rem;font-weight:700;color:#075E54;margin-bottom:3px;opacity:.8}
-.wa-human .wa-sender{color:#16a34a}
-.wa-ts{position:absolute;bottom:4px;right:8px;font-size:.65rem;color:rgba(0,0,0,.38);white-space:nowrap;display:flex;align-items:center;gap:3px}
+.wa-in{background:var(--wa-bubble-in);border-radius:0 8px 8px 8px}
+.wa-in::before{content:'';position:absolute;left:-7px;top:0;border:7px solid transparent;border-right-color:var(--wa-bubble-in);border-top-color:var(--wa-bubble-in)}
+.wa-out{background:var(--wa-bubble-out);border-radius:8px 0 8px 8px}
+.wa-out::after{content:'';position:absolute;right:-7px;top:0;border:7px solid transparent;border-left-color:var(--wa-bubble-out);border-top-color:var(--wa-bubble-out)}
+.wa-human{background:var(--wa-bubble-human)}
+.wa-human::after{border-left-color:var(--wa-bubble-human);border-top-color:var(--wa-bubble-human)}
+.wa-sender{display:block;font-size:.68rem;font-weight:700;color:var(--wa-sender);margin-bottom:3px;opacity:.8}
+.wa-human .wa-sender{color:var(--wa-sender-human)}
+.wa-ts{position:absolute;bottom:4px;right:8px;font-size:.65rem;color:var(--wa-timestamp);white-space:nowrap;display:flex;align-items:center;gap:3px}
 .wa-tick{color:#53bdeb}
-.wa-system{background:rgba(0,0,0,.06);border-radius:12px;padding:4px 12px;font-size:.72rem;color:#475569;text-align:center;max-width:80%}
+.wa-system{background:var(--wa-overlay-fill);border-radius:12px;padding:4px 12px;font-size:.72rem;color:var(--wa-system-text);text-align:center;max-width:80%}
 .wa-img-bubble{padding:6px 6px 20px}
 .wa-img{display:block;max-width:100%;width:240px;height:auto;border-radius:6px;cursor:pointer}
 .wa-img-cap{padding:6px 6px 0;font-size:.85rem;line-height:1.4}
 @media(max-width:480px){.wa-img{width:180px}}
 
+.img-lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:2000;padding:32px;cursor:zoom-out}
+.img-lightbox.open{display:flex}
+.img-lightbox img{max-width:100%;max-height:100%;border-radius:6px;box-shadow:0 10px 40px rgba(0,0,0,.5);cursor:default}
+.img-lightbox-close{position:absolute;top:16px;right:20px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;width:36px;height:36px;border-radius:50%;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.img-lightbox-close:hover{background:rgba(255,255,255,.25)}
+
 .wa-doc-bubble{min-width:200px}
-.wa-doc{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.06);border-radius:8px;padding:8px 10px;margin-top:2px;color:inherit;text-decoration:none}
+.wa-doc{display:flex;align-items:center;gap:8px;background:var(--wa-overlay-fill);border-radius:8px;padding:8px 10px;margin-top:2px;color:inherit;text-decoration:none}
 a.wa-doc{cursor:pointer;transition:background .15s}
-a.wa-doc:hover{background:rgba(0,0,0,.12)}
+a.wa-doc:hover{background:var(--wa-overlay-fill-strong)}
 a.wa-doc .wa-doc-name{text-decoration:underline}
 .wa-doc-icon{font-size:1.3rem}
 .wa-doc-name{font-size:.85rem;font-weight:600;word-break:break-all}
 .wa-doc-cap{padding:6px 2px 0;font-size:.85rem;line-height:1.4}
 
-.wa-quote{background:rgba(0,0,0,.06);border-left:3px solid #25D366;border-radius:6px;padding:5px 8px;margin-bottom:5px;font-size:.8rem;line-height:1.35;max-height:2.7em;overflow:hidden}
-.wa-quote-sender{display:block;font-weight:700;color:#075E54;font-size:.75rem}
-.wa-in .wa-quote{border-left-color:#94a3b8}
-.wa-in .wa-quote-sender{color:#475569}
+.wa-quote{background:var(--wa-overlay-fill);border-left:3px solid #25D366;border-radius:6px;padding:5px 8px;margin-bottom:5px;font-size:.8rem;line-height:1.35;max-height:2.7em;overflow:hidden}
+.wa-quote-sender{display:block;font-weight:700;color:var(--wa-sender);font-size:.75rem}
+.wa-in .wa-quote{border-left-color:var(--text-3)}
+.wa-in .wa-quote-sender{color:var(--wa-sender-in)}
 
 .wa-row{position:relative}
-.wa-reply-btn{position:absolute;top:2px;background:#fff;border:1px solid #e2e8f0;border-radius:50%;width:26px;height:26px;font-size:.9rem;color:#64748b;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:.85;transition:opacity .15s,background .15s}
+.wa-reply-btn{position:absolute;top:2px;background:var(--bg-1);border:1px solid var(--border-1);border-radius:50%;width:26px;height:26px;font-size:.9rem;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:.85;transition:opacity .15s,background .15s}
 .wa-row-in .wa-reply-btn{right:-4px}
 .wa-row-out .wa-reply-btn{left:-4px}
-.wa-reply-btn:hover:not(:disabled){opacity:1;background:#f0fdf4}
+.wa-reply-btn:hover:not(:disabled){opacity:1;background:var(--hover-success-bg)}
 .wa-reply-btn:disabled{opacity:0;pointer-events:none}
 @media(max-width:768px){.wa-reply-btn{opacity:.7}}
 
-.wa-reply-banner{display:flex;align-items:center;gap:8px;background:#f0f2f5;border-left:3px solid #25D366;border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:.8rem}
+.wa-reply-banner{display:flex;align-items:center;gap:8px;background:var(--bg-2);border-left:3px solid #25D366;border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:.8rem}
 .wa-reply-banner-body{flex:1;min-width:0}
-.wa-reply-banner-sender{display:block;font-weight:700;color:#075E54;font-size:.75rem}
+.wa-reply-banner-sender{display:block;font-weight:700;color:var(--wa-sender);font-size:.75rem}
 .wa-reply-banner-preview{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wa-reply-cancel{background:none;border:none;color:#64748b;font-size:1.1rem;cursor:pointer;padding:2px 6px;flex-shrink:0}
+.wa-reply-cancel{background:none;border:none;color:var(--text-2);font-size:1.1rem;cursor:pointer;padding:2px 6px;flex-shrink:0}
 
-.wa-attach{width:40px;height:40px;border-radius:50%;background:#fff;border:1px solid #d1d5db;color:#075E54;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
-.wa-attach:hover:not(:disabled){background:#f0fdf4}
-.wa-attach:disabled{color:#94a3b8;cursor:not-allowed}
+.wa-attach{width:40px;height:40px;border-radius:50%;background:var(--bg-1);border:1px solid var(--border-2);color:#075E54;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
+.wa-attach:hover:not(:disabled){background:var(--hover-success-bg)}
+.wa-attach:disabled{color:var(--text-3);cursor:not-allowed}
 
 /* Input area */
-.wa-input-area{background:#f0f2f5;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom, 0px));border-top:1px solid #e2e8f0;flex-shrink:0}
-.wa-input-locked{background:#f8f9fa}
+.wa-input-area{background:var(--bg-2);padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom, 0px));border-top:1px solid var(--border-1);flex-shrink:0}
+.wa-input-locked{background:var(--bg-2)}
 .wa-lock-notice{font-size:.78rem;color:#d97706;background:#fef9c3;border:1px solid #fde68a;padding:6px 12px;border-radius:6px;margin-bottom:8px;text-align:center;font-weight:500}
 .wa-input-row{display:flex;align-items:flex-end;gap:8px}
 @media(max-width:480px){
@@ -946,20 +1044,20 @@ a.wa-doc .wa-doc-name{text-decoration:underline}
   .wa-send{width:38px;height:38px;font-size:1rem}
   .wa-ta{padding:9px 12px}
 }
-.wa-ta{flex:1;min-width:0;border:none;background:#fff;padding:10px 14px;border-radius:22px;font-size:16px;font-family:inherit;resize:none;outline:none;line-height:1.4;max-height:120px;overflow-y:auto;box-shadow:0 1px 2px rgba(0,0,0,.08);color:#111}
-.wa-ta:disabled{background:#f1f5f9;color:#94a3b8;cursor:not-allowed}
+.wa-ta{flex:1;min-width:0;border:none;background:var(--bg-1);padding:10px 14px;border-radius:22px;font-size:16px;font-family:inherit;resize:none;outline:none;line-height:1.4;max-height:120px;overflow-y:auto;box-shadow:0 1px 2px rgba(0,0,0,.08);color:var(--text-1)}
+.wa-ta:disabled{background:var(--bg-3);color:var(--text-3);cursor:not-allowed}
 .wa-send{width:44px;height:44px;border-radius:50%;background:#25D366;border:none;color:#fff;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s;box-shadow:0 2px 4px rgba(37,211,102,.4)}
 .wa-send:hover:not(:disabled){background:#1ebe5a}
 .wa-send-disabled{background:#94a3b8;box-shadow:none;cursor:not-allowed}
 
 /* Tables */
-.tbl-wrap{overflow-x:auto;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid #e2e8f0}
-table{width:100%;border-collapse:collapse;background:#fff}
-th{background:#f8fafc;padding:11px 14px;text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;white-space:nowrap}
-td{padding:12px 14px;border-top:1px solid #f1f5f9;font-size:.875rem;vertical-align:top}
-tr:hover td{background:#fafbfd}
+.tbl-wrap{overflow-x:auto;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid var(--border-1)}
+table{width:100%;border-collapse:collapse;background:var(--bg-1)}
+th{background:var(--bg-2);padding:11px 14px;text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border-1);white-space:nowrap}
+td{padding:12px 14px;border-top:1px solid var(--border-1);font-size:.875rem;vertical-align:top}
+tr:hover td{background:var(--bg-3)}
 .mono{font-family:'SF Mono','Fira Code',monospace;font-size:.8rem}
-.muted{color:#64748b;font-size:.8rem}
+.muted{color:var(--text-2);font-size:.8rem}
 .chip{display:inline-block;padding:3px 9px;border-radius:20px;font-size:.72rem;font-weight:700;text-transform:capitalize}
 .chip-solar{background:#fef3c7;color:#92400e}
 .chip-borehole{background:#dbeafe;color:#1e40af}
@@ -971,7 +1069,7 @@ tr:hover td{background:#fafbfd}
 .status-contacted{background:#fef3c7;color:#92400e}
 .status-converted{background:#dcfce7;color:#166534}
 .status-lost{background:#fee2e2;color:#991b1b}
-.tbl-empty{text-align:center;padding:48px 24px;color:#94a3b8;background:#fff;border-radius:10px}
+.tbl-empty{text-align:center;padding:48px 24px;color:var(--text-3);background:var(--bg-1);border-radius:10px}
 .tbl-empty div{font-size:2.5rem;margin-bottom:10px}
 .tbl-empty p{font-size:.9rem}
 .nowrap{white-space:nowrap}
@@ -979,25 +1077,41 @@ tr:hover td{background:#fafbfd}
 .notes-cell{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;cursor:pointer}
 .notes-cell.expanded{display:block;-webkit-line-clamp:unset;overflow:visible}
 .cell-flex{display:flex;align-items:center;gap:4px}
-.copy-btn{background:none;border:none;cursor:pointer;font-size:.8rem;padding:2px 5px;color:#94a3b8;border-radius:4px;line-height:1;flex-shrink:0}
-.copy-btn:hover{background:#f1f5f9;color:#334155}
+.copy-btn{background:none;border:none;cursor:pointer;font-size:.8rem;padding:2px 5px;color:var(--text-3);border-radius:4px;line-height:1;flex-shrink:0}
+.copy-btn:hover{background:var(--bg-3);color:var(--text-1)}
 @media(max-width:768px){
   .pane-scroll{padding:12px 8px}
   table{min-width:640px}
   th,td{padding:9px 10px;font-size:.8rem}
   .wrap-cell{min-width:140px;max-width:220px}
+
+  /* Leads/Callbacks/Escalations reflow into stacked cards instead of a cramped scrolling
+     table — each <td> already carries a data-label attribute matching its column header
+     (added at the point each row is built), which ::before renders as the card's field
+     label. Tables elsewhere (Tower/Drilling/Solar Pricing) keep the normal scroll-table
+     layout since they weren't given the tbl-cards class or data-label attributes. */
+  .tbl-cards{overflow-x:visible}
+  .tbl-cards table{min-width:0;width:100%}
+  .tbl-cards thead{display:none}
+  .tbl-cards tbody{display:block}
+  .tbl-cards tr{display:block;margin-bottom:10px;padding:10px 12px;border:1px solid var(--border-1);border-radius:10px;background:var(--bg-1)}
+  .tbl-cards tr:hover td{background:transparent}
+  .tbl-cards td{display:block;width:auto;max-width:none;min-width:0;border-top:none;border-bottom:1px solid var(--border-1);padding:7px 0}
+  .tbl-cards td:last-child{border-bottom:none;padding-bottom:0}
+  .tbl-cards td:first-child{padding-top:0}
+  .tbl-cards td[data-label]::before{content:attr(data-label);display:block;font-weight:600;color:var(--text-2);font-size:.68rem;text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px}
 }
 
 /* ── Filter bar ── */
-.wa-filter-bar{display:flex;gap:6px;padding:8px 12px;background:#f0f2f5;border-bottom:1px solid #e2e8f0;flex-shrink:0}
-.wa-filt{background:#fff;border:1px solid #d1d5db;border-radius:14px;padding:4px 12px;font-size:.75rem;cursor:pointer;color:#475569;font-weight:500;transition:all .15s;white-space:nowrap}
+.wa-filter-bar{display:flex;gap:6px;padding:8px 12px;background:var(--bg-2);border-bottom:1px solid var(--border-1);flex-shrink:0}
+.wa-filt{background:var(--bg-1);border:1px solid var(--border-2);border-radius:14px;padding:4px 12px;font-size:.75rem;cursor:pointer;color:var(--text-2);font-weight:500;transition:all .15s;white-space:nowrap}
 .wa-filt:hover{border-color:#25D366;color:#075E54}
 .wa-filt-active{background:#075E54;border-color:#075E54;color:#fff}
 
 /* ── Quick reply templates ── */
-.wa-quick-replies{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px 4px;background:#f0f2f5;border-top:1px solid #e2e8f0}
-.wa-qr-btn{background:#fff;border:1px solid #d1d5db;border-radius:14px;padding:5px 11px;font-size:.74rem;cursor:pointer;color:#075E54;font-weight:500;transition:all .15s;white-space:nowrap;text-align:left}
-.wa-qr-btn:hover{background:#dcfce7;border-color:#25D366}
+.wa-quick-replies{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px 4px;background:var(--bg-2);border-top:1px solid var(--border-1)}
+.wa-qr-btn{background:var(--bg-1);border:1px solid var(--border-2);border-radius:14px;padding:5px 11px;font-size:.74rem;cursor:pointer;color:#075E54;font-weight:500;transition:all .15s;white-space:nowrap;text-align:left}
+.wa-qr-btn:hover{background:var(--hover-success-bg);border-color:#25D366}
 
 /* ── Lead pill in chat header ── */
 .wa-lead-pill{font-size:.7rem;color:rgba(255,255,255,.8);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
@@ -1005,27 +1119,27 @@ tr:hover td{background:#fafbfd}
 .wa-blocked-pill{font-size:.7rem;font-weight:600;color:#fecaca;margin-top:2px}
 
 /* ── Stat subtitle ── */
-.stat-sub{font-size:.68rem;color:#94a3b8;margin-top:1px}
+.stat-sub{font-size:.68rem;color:var(--text-3);margin-top:1px}
 
 /* ── Pane toolbar (export button row) ── */
-.pane-toolbar{display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;background:#fff;border-bottom:1px solid #e2e8f0;flex-shrink:0}
+.pane-toolbar{display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;background:var(--bg-1);border-bottom:1px solid var(--border-1);flex-shrink:0}
 .export-btn{background:#075E54;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:.8rem;font-weight:600;cursor:pointer;transition:background .15s;text-decoration:none;display:inline-flex;align-items:center}
 .export-btn:hover{background:#054a3a}
 .catalog-toolbar{justify-content:flex-start}
-.catalog-url-input{flex:1;min-width:0;max-width:520px;padding:7px 12px;border:1.5px solid #cbd5e1;border-radius:6px;font-size:.8rem;font-family:inherit;color:#111}
+.catalog-url-input{flex:1;min-width:0;max-width:520px;padding:7px 12px;border:1.5px solid var(--border-2);border-radius:6px;font-size:.8rem;font-family:inherit;color:var(--text-1)}
 .catalog-url-input:focus{outline:none;border-color:#075E54}
-.catalog-status{padding:6px 16px;font-size:.78rem;color:#64748b;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+.catalog-status{padding:6px 16px;font-size:.78rem;color:var(--text-2);background:var(--bg-2);border-bottom:1px solid var(--border-1)}
 
 /* ── Modal (Add Lead) ── */
-.modal-overlay{position:fixed;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
-.modal-card{background:#fff;border-radius:12px;padding:24px;max-width:420px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.2)}
+.modal-overlay{position:fixed;inset:0;background:var(--modal-overlay-bg);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
+.modal-card{background:var(--bg-1);border-radius:12px;padding:24px;max-width:420px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.2)}
 .modal-card h3{margin:0 0 16px;font-size:1.05rem;color:#075E54}
-.modal-card label{display:block;font-size:.8rem;font-weight:600;color:#334155;margin-bottom:12px}
-.modal-card input,.modal-card select,.modal-card textarea{width:100%;padding:9px 10px;margin-top:5px;font-family:inherit;font-size:.88rem;border:1.5px solid #cbd5e1;border-radius:6px;color:#111}
+.modal-card label{display:block;font-size:.8rem;font-weight:600;color:var(--text-1);margin-bottom:12px}
+.modal-card input,.modal-card select,.modal-card textarea{width:100%;padding:9px 10px;margin-top:5px;font-family:inherit;font-size:.88rem;border:1.5px solid var(--border-2);border-radius:6px;color:var(--text-1);background:var(--bg-1)}
 .modal-card input:focus,.modal-card select:focus,.modal-card textarea:focus{outline:none;border-color:#075E54}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;flex-wrap:wrap}
 .modal-card-wide{max-width:820px}
-.modal-card-wide h4{margin:16px 0 4px;font-size:.85rem;color:#075E54;border-top:1px solid #e2e8f0;padding-top:12px}
+.modal-card-wide h4{margin:16px 0 4px;font-size:.85rem;color:#075E54;border-top:1px solid var(--border-1);padding-top:12px}
 .dq-row4{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0 12px}
 .dq-item-row{display:grid;grid-template-columns:1fr 90px 110px;gap:6px;align-items:center;font-size:.78rem;padding:4px 0}
 .dq-item-row input[type="text"]{margin:0;padding:4px 6px;font-size:.78rem}
@@ -1034,23 +1148,31 @@ tr:hover td{background:#fafbfd}
 .dq-add-row{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
 .dq-add-row input[type="text"]{flex:1;min-width:140px;margin:0;padding:4px 6px;font-size:.78rem}
 .dq-add-row input[type="number"]{width:90px;margin:0;padding:4px 6px;font-size:.78rem}
-.dq-preview{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:12px;font-size:.85rem;line-height:1.7}
-.sq-item-row{display:grid;grid-template-columns:1fr 130px 70px 100px 22px;gap:6px;align-items:center;font-size:.78rem;padding:4px 0;border-bottom:1px solid #f1f5f9}
+.dq-preview{background:var(--bg-2);border:1px solid var(--border-1);border-radius:8px;padding:12px;margin-top:12px;font-size:.85rem;line-height:1.7}
+.sq-item-row{display:grid;grid-template-columns:1fr 130px 70px 100px 22px;gap:6px;align-items:center;font-size:.78rem;padding:4px 0;border-bottom:1px solid var(--border-1)}
 .sq-item-row input[type="text"],.sq-item-row input[type="number"],.sq-item-row select{margin:0;padding:4px 6px;font-size:.78rem}
 .sq-item-row .sq-remove{cursor:pointer;color:#b91c1c;font-weight:700;text-align:center;user-select:none}
 .solar-tier-arrow{display:inline-block;transition:transform .15s;font-size:.7rem}
 .solar-tier-arrow.open{transform:rotate(90deg)}
+.dq-sec-hdr{margin:16px 0 4px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+.dq-sec-hdr:hover{color:#075E54}
+.dq-sec-arrow{display:inline-block;transition:transform .15s;font-size:.7rem}
+.dq-sec-arrow.open{transform:rotate(90deg)}
+.dq-sec-note{font-weight:400;color:var(--text-2);font-size:.78rem}
 .analytics-bars{display:flex;flex-direction:column;gap:10px;max-width:600px}
 .analytics-bar-row{display:grid;grid-template-columns:140px 1fr 100px;gap:10px;align-items:center;font-size:.85rem}
-.analytics-bar-track{background:#f1f5f9;border-radius:4px;height:14px;overflow:hidden}
+.analytics-bar-track{background:var(--bg-3);border-radius:4px;height:14px;overflow:hidden}
 .analytics-bar-fill{height:100%;border-radius:4px}
 .analytics-bar-value{text-align:right}
 
 /* ── Escalation resolve ── */
-.resolve-btn{background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:4px 10px;font-size:.75rem;cursor:pointer;color:#475569;font-weight:500;transition:all .15s}
-.resolve-btn:hover{background:#dcfce7;border-color:#25D366;color:#16a34a}
+.resolve-btn{background:var(--bg-3);border:1px solid var(--border-2);border-radius:6px;padding:4px 10px;font-size:.75rem;cursor:pointer;color:var(--text-2);font-weight:500;transition:all .15s}
+.resolve-btn:hover{background:var(--hover-success-bg);border-color:#25D366;color:#16a34a}
 .resolved-badge{font-size:.75rem;color:#16a34a;font-weight:600}
 tr.esc-resolved td{opacity:.45}
+
+/* Theme toggle */
+.theme-toggle{font-size:.95rem}
 
 /* Toast */
 #toasts{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
@@ -1065,6 +1187,14 @@ tr.esc-resolved td{opacity:.45}
 
 <div id="toasts"></div>
 
+<!-- Photo lightbox — customer-sent photos (.wa-img, incoming) render as a plain <img> with no
+     click handler; cursor:pointer on that class was signaling an intent that was never wired
+     up. Clicking one opens it here at full size instead of doing nothing. -->
+<div id="imgLightbox" class="img-lightbox" onclick="if(event.target===this)closeLightbox()">
+  <button type="button" class="img-lightbox-close" onclick="closeLightbox()" title="Close" aria-label="Close">&#10005;</button>
+  <img id="lightboxImg" src="" alt="Full-size photo">
+</div>
+
 <div class="topbar">
   <div class="topbar-brand">
     <div class="topbar-logo-chip"><img src="/logo.png" alt="Waterlift Solar" class="topbar-logo"></div>
@@ -1076,6 +1206,7 @@ tr.esc-resolved td{opacity:.45}
   <div class="top-right">
     <div class="live"><span class="live-dot"></span>Live</div>
     <span class="logged-in-as">${esc(adminEmail || '')}</span>
+    <button class="refresh-btn theme-toggle" id="themeToggleBtn" onclick="toggleTheme()" title="Toggle dark mode">&#127769;</button>
     <button class="refresh-btn" id="statsToggleBtn" onclick="toggleStats()">&#128202; Hide Stats</button>
     <button class="refresh-btn" onclick="openDevicesModal()">&#128241; Devices</button>
     <button class="refresh-btn" id="notifBtn" onclick="subscribeToPush()">&#128276; Enable Notifications</button>
@@ -1109,9 +1240,14 @@ tr.esc-resolved td{opacity:.45}
   <button class="tab" onclick="showTab('cb',this)">&#128222; Callbacks (${callbacks.length})</button>
   <button class="tab" onclick="showTab('esc',this)">&#128680; Escalations (${escalations.length})</button>
   <button class="tab" onclick="showTab('catalog',this)">&#128230; Catalog (<span id="catalogTabCount">${productCount}</span>)</button>
-  <button class="tab" onclick="showTab('towers',this)">&#127959;&#65039; Tower Pricing (${towerPricing.packages.length})</button>
-  <button class="tab" onclick="showTab('drilling',this)">&#9935;&#65039; Drilling Pricing</button>
-  <button class="tab" onclick="showTab('solar',this)">&#9728;&#65039; Solar Pricing</button>
+  <div class="tab-dropdown">
+    <button class="tab" id="pricingTabBtn" onclick="togglePricingMenu(event)">&#127991;&#65039; Pricing &#9662;</button>
+    <div class="tab-dropdown-menu" id="pricingMenu">
+      <button type="button" onclick="showPricingTab('towers',this)">&#127959;&#65039; Tower Pricing (${towerPricing.packages.length})</button>
+      <button type="button" onclick="showPricingTab('drilling',this)">&#9935;&#65039; Drilling Pricing</button>
+      <button type="button" onclick="showPricingTab('solar',this)">&#9728;&#65039; Solar Pricing</button>
+    </div>
+  </div>
   <button class="tab" onclick="showTab('analytics',this)">&#128202; Analytics</button>
 </div>
 
@@ -1127,7 +1263,7 @@ tr.esc-resolved td{opacity:.45}
         </span>
       </div>
       <div class="wa-search">
-        <input type="text" placeholder="&#128269; Search by number or message..." oninput="filterContacts(this.value)">
+        <input type="text" placeholder="&#128269; Search by name, number, or anything said in the chat..." oninput="filterContacts(this.value)">
       </div>
       <div class="wa-filter-bar">
         <button class="wa-filt wa-filt-active" id="filt-all" onclick="filterDomain('all')">All</button>
@@ -1426,117 +1562,131 @@ tr.esc-resolved td{opacity:.45}
     <label>Date<input type="date" id="dq-date"></label>
     <label>Borehole Depth, metres<input type="number" id="dq-depth" min="1" required></label>
 
-    <h4 style="margin:16px 0 4px">Drilling Rate Method</h4>
-    <div class="dq-row4">
-      <label><input type="radio" name="dq-ratemethod" id="dq-method-costing" value="costing" checked onchange="toggleDrillingRateMethod()"> Full Costing Calculation</label>
-      <label><input type="radio" name="dq-ratemethod" id="dq-method-direct" value="direct" onchange="toggleDrillingRateMethod()"> Enter Rate Directly</label>
-    </div>
-    <div class="dq-row4" id="dq-direct-section" style="display:none">
-      <label>Drilling Rate (KShs/metre)<input type="number" id="dq-directrate" step="0.01"></label>
-    </div>
-
-    <div class="dq-costing-only">
-      <label>Penetration Rate<select id="dq-penetration"></select></label>
-      <div class="dq-add-row">
-        <input type="text" id="dq-new-pr-label" placeholder="New preset label, e.g. 45 min/rod">
-        <input type="number" id="dq-new-pr-minutes" step="0.1" placeholder="Minutes/rod">
-        <input type="number" id="dq-new-pr-rodlength" step="0.1" placeholder="Rod length, m" value="5">
-        <button type="button" class="export-btn" onclick="addNewPenetrationRate()">&#10133; Add Preset</button>
-      </div>
-
-      <h4 style="margin:16px 0 4px">Fuel</h4>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-rate',this)"><span class="dq-sec-arrow open">&#9654;</span> Drilling Rate</h4>
+    <div id="dq-sec-rate">
       <div class="dq-row4">
-        <label>Flushing Fuel (L)<input type="number" id="dq-flushing" step="0.01"></label>
-        <label>Rig Truck Fuel (L)<input type="number" id="dq-rigfuel" step="0.01"></label>
-        <label>Test Pumping Fuel (L)<input type="number" id="dq-testfuel" step="0.01"></label>
-        <label>Fuel Rate (KShs/L)<input type="number" id="dq-fuelrate" step="0.01"></label>
+        <label><input type="radio" name="dq-ratemethod" id="dq-method-costing" value="costing" checked onchange="toggleDrillingRateMethod()"> Full Costing Calculation</label>
+        <label><input type="radio" name="dq-ratemethod" id="dq-method-direct" value="direct" onchange="toggleDrillingRateMethod()"> Enter Rate Directly</label>
+      </div>
+      <div class="dq-row4" id="dq-direct-section" style="display:none">
+        <label>Drilling Rate (KShs/metre)<input type="number" id="dq-directrate" step="0.01"></label>
+      </div>
+
+      <div class="dq-costing-only">
+        <label>Penetration Rate<select id="dq-penetration"></select></label>
+        <div class="dq-add-row">
+          <input type="text" id="dq-new-pr-label" placeholder="New preset label, e.g. 45 min/rod">
+          <input type="number" id="dq-new-pr-minutes" step="0.1" placeholder="Minutes/rod">
+          <input type="number" id="dq-new-pr-rodlength" step="0.1" placeholder="Rod length, m" value="5">
+          <button type="button" class="export-btn" onclick="addNewPenetrationRate()">&#10133; Add Preset</button>
+        </div>
+
+        <h4 style="margin:16px 0 4px">Fuel</h4>
+        <div class="dq-row4">
+          <label>Flushing Fuel (L)<input type="number" id="dq-flushing" step="0.01"></label>
+          <label>Rig Truck Fuel (L)<input type="number" id="dq-rigfuel" step="0.01"></label>
+          <label>Test Pumping Fuel (L)<input type="number" id="dq-testfuel" step="0.01"></label>
+          <label>Fuel Rate (KShs/L)<input type="number" id="dq-fuelrate" step="0.01"></label>
+        </div>
       </div>
     </div>
 
-    <h4 style="margin:16px 0 4px">Casing &amp; Surface Casing</h4>
-    <div class="dq-row4">
-      <label>Casing Rate (KShs/m)<input type="number" id="dq-casingrate" step="0.01"></label>
-      <label class="dq-costing-only">Drilling Rate Deduction (costing mode only)<input type="number" id="dq-deduction" step="0.01"></label>
-      <label>Surface Casing Rate<input type="number" id="dq-surfacerate" step="0.01"></label>
-      <label><input type="checkbox" id="dq-surfaceincluded"> Include Surface Casing in Total</label>
-    </div>
-
-    <div class="dq-costing-only">
-      <h4 style="margin:16px 0 4px">Gravel</h4>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-casing',this)"><span class="dq-sec-arrow open">&#9654;</span> Casing &amp; Surface Casing</h4>
+    <div id="dq-sec-casing">
       <div class="dq-row4">
-        <label>Tonnes/Metre<input type="number" id="dq-graveltonnes" step="0.001"></label>
-        <label>Bag Size (Kg)<input type="number" id="dq-bagsize" step="1"></label>
-        <label>Rate/Bag (KShs)<input type="number" id="dq-bagrate" step="0.01"></label>
+        <label>Casing Rate (KShs/m)<input type="number" id="dq-casingrate" step="0.01"></label>
+        <label class="dq-costing-only">Drilling Rate Deduction (costing mode only)<input type="number" id="dq-deduction" step="0.01"></label>
+        <label>Surface Casing Rate<input type="number" id="dq-surfacerate" step="0.01"></label>
+        <label><input type="checkbox" id="dq-surfaceincluded"> Include Surface Casing in Total</label>
       </div>
     </div>
 
-    <div class="dq-costing-only">
-      <h4 style="margin:16px 0 4px">Consumables (internal costing — affects drilling rate only)</h4>
-      <div id="dq-consumables"></div>
-      <div class="dq-add-row">
-        <input type="text" id="dq-new-consumable-name" placeholder="New consumable name">
-        <input type="number" id="dq-new-consumable-qty" step="0.001" placeholder="Qty" value="1">
-        <input type="number" id="dq-new-consumable-rate" step="0.01" placeholder="Rate, KShs">
-        <button type="button" class="export-btn" onclick="addNewConsumable()">&#10133; Add Consumable</button>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-gravel',this)"><span class="dq-sec-arrow">&#9654;</span> Gravel <span class="dq-sec-note">(costing mode only — usually fine at the defaults)</span></h4>
+    <div id="dq-sec-gravel" style="display:none">
+      <div class="dq-costing-only">
+        <div class="dq-row4">
+          <label>Tonnes/Metre<input type="number" id="dq-graveltonnes" step="0.001"></label>
+          <label>Bag Size (Kg)<input type="number" id="dq-bagsize" step="1"></label>
+          <label>Rate/Bag (KShs)<input type="number" id="dq-bagrate" step="0.01"></label>
+        </div>
       </div>
     </div>
 
-    <h4 style="margin:16px 0 4px">Mobilization Method</h4>
-    <div class="dq-row4">
-      <label><input type="radio" name="dq-mobmethod" id="dq-mobmethod-calc" value="calc" checked onchange="toggleMobilizationMethod()"> Calculate from Distance</label>
-      <label><input type="radio" name="dq-mobmethod" id="dq-mobmethod-direct" value="direct" onchange="toggleMobilizationMethod()"> Enter Total Directly</label>
-    </div>
-    <div class="dq-row4" id="dq-mob-direct-section" style="display:none">
-      <label>Mobilization Total (KShs)<input type="number" id="dq-mob-directtotal" step="0.01"></label>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-consumables',this)"><span class="dq-sec-arrow">&#9654;</span> Consumables <span class="dq-sec-note">(costing mode only — usually fine at the defaults)</span></h4>
+    <div id="dq-sec-consumables" style="display:none">
+      <div class="dq-costing-only">
+        <div id="dq-consumables"></div>
+        <div class="dq-add-row">
+          <input type="text" id="dq-new-consumable-name" placeholder="New consumable name">
+          <input type="number" id="dq-new-consumable-qty" step="0.001" placeholder="Qty" value="1">
+          <input type="number" id="dq-new-consumable-rate" step="0.01" placeholder="Rate, KShs">
+          <button type="button" class="export-btn" onclick="addNewConsumable()">&#10133; Add Consumable</button>
+        </div>
+      </div>
     </div>
 
-    <div class="dq-mob-calc-only">
-      <h4 style="margin:16px 0 4px">Mobilization — Rig</h4>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-mob',this)"><span class="dq-sec-arrow open">&#9654;</span> Mobilization</h4>
+    <div id="dq-sec-mob">
       <div class="dq-row4">
-        <label>Tarmac (km)<input type="number" id="dq-rig-tarmac" step="0.1" value="0"></label>
-        <label>Rough Road (km)<input type="number" id="dq-rig-rough" step="0.1" value="0"></label>
-        <label>Tarmac Consumption (km/L)<input type="number" id="dq-rig-ctarmac" step="0.1"></label>
-        <label>Rough Consumption (km/L)<input type="number" id="dq-rig-crough" step="0.1"></label>
+        <label><input type="radio" name="dq-mobmethod" id="dq-mobmethod-calc" value="calc" checked onchange="toggleMobilizationMethod()"> Calculate from Distance</label>
+        <label><input type="radio" name="dq-mobmethod" id="dq-mobmethod-direct" value="direct" onchange="toggleMobilizationMethod()"> Enter Total Directly</label>
       </div>
-      <div id="dq-mob-rig"></div>
+      <div class="dq-row4" id="dq-mob-direct-section" style="display:none">
+        <label>Mobilization Total (KShs)<input type="number" id="dq-mob-directtotal" step="0.01"></label>
+      </div>
 
-      <h4 style="margin:16px 0 4px">Mobilization — Support Truck</h4>
-      <div class="dq-row4">
-        <label>Tarmac (km)<input type="number" id="dq-truck-tarmac" step="0.1" value="0"></label>
-        <label>Rough Road (km)<input type="number" id="dq-truck-rough" step="0.1" value="0"></label>
-        <label>Tarmac Consumption (km/L)<input type="number" id="dq-truck-ctarmac" step="0.1"></label>
-        <label>Rough Consumption (km/L)<input type="number" id="dq-truck-crough" step="0.1"></label>
-      </div>
-      <div id="dq-mob-truck"></div>
+      <div class="dq-mob-calc-only">
+        <h4 style="margin:16px 0 4px">Mobilization — Rig</h4>
+        <div class="dq-row4">
+          <label>Tarmac (km)<input type="number" id="dq-rig-tarmac" step="0.1" value="0"></label>
+          <label>Rough Road (km)<input type="number" id="dq-rig-rough" step="0.1" value="0"></label>
+          <label>Tarmac Consumption (km/L)<input type="number" id="dq-rig-ctarmac" step="0.1"></label>
+          <label>Rough Consumption (km/L)<input type="number" id="dq-rig-crough" step="0.1"></label>
+        </div>
+        <div id="dq-mob-rig"></div>
 
-      <h4 style="margin:16px 0 4px">Mobilization — Test Pumping Unit Truck</h4>
-      <div class="dq-row4">
-        <label>Tarmac (km)<input type="number" id="dq-testpump-tarmac" step="0.1" value="0"></label>
-        <label>Rough Road (km)<input type="number" id="dq-testpump-rough" step="0.1" value="0"></label>
-        <label>Tarmac Consumption (km/L)<input type="number" id="dq-testpump-ctarmac" step="0.1"></label>
-        <label>Rough Consumption (km/L)<input type="number" id="dq-testpump-crough" step="0.1"></label>
-      </div>
-      <div id="dq-mob-testpump"></div>
-      <div class="dq-add-row">
-        <input type="text" id="dq-new-mob-name" placeholder="New mobilization cost type (added to Rig, Truck and Test Pumping Unit lists above)">
-        <input type="number" id="dq-new-mob-qty" step="0.001" placeholder="Qty" value="1">
-        <input type="number" id="dq-new-mob-rate" step="0.01" placeholder="Rate, KShs">
-        <button type="button" class="export-btn" onclick="addNewMobilizationCost()">&#10133; Add Mobilization Cost</button>
+        <h4 style="margin:16px 0 4px">Mobilization — Support Truck</h4>
+        <div class="dq-row4">
+          <label>Tarmac (km)<input type="number" id="dq-truck-tarmac" step="0.1" value="0"></label>
+          <label>Rough Road (km)<input type="number" id="dq-truck-rough" step="0.1" value="0"></label>
+          <label>Tarmac Consumption (km/L)<input type="number" id="dq-truck-ctarmac" step="0.1"></label>
+          <label>Rough Consumption (km/L)<input type="number" id="dq-truck-crough" step="0.1"></label>
+        </div>
+        <div id="dq-mob-truck"></div>
+
+        <h4 style="margin:16px 0 4px">Mobilization — Test Pumping Unit Truck</h4>
+        <div class="dq-row4">
+          <label>Tarmac (km)<input type="number" id="dq-testpump-tarmac" step="0.1" value="0"></label>
+          <label>Rough Road (km)<input type="number" id="dq-testpump-rough" step="0.1" value="0"></label>
+          <label>Tarmac Consumption (km/L)<input type="number" id="dq-testpump-ctarmac" step="0.1"></label>
+          <label>Rough Consumption (km/L)<input type="number" id="dq-testpump-crough" step="0.1"></label>
+        </div>
+        <div id="dq-mob-testpump"></div>
+        <div class="dq-add-row">
+          <input type="text" id="dq-new-mob-name" placeholder="New mobilization cost type (added to Rig, Truck and Test Pumping Unit lists above)">
+          <input type="number" id="dq-new-mob-qty" step="0.001" placeholder="Qty" value="1">
+          <input type="number" id="dq-new-mob-rate" step="0.01" placeholder="Rate, KShs">
+          <button type="button" class="export-btn" onclick="addNewMobilizationCost()">&#10133; Add Mobilization Cost</button>
+        </div>
       </div>
     </div>
 
-    <h4 style="margin:16px 0 4px">VAT &amp; Payment</h4>
-    <div class="dq-row4">
-      <label>VAT Rate (%)<input type="number" id="dq-vat" step="0.1"></label>
-      <label>Deposit (%)<input type="number" id="dq-depositpct" step="0.1"></label>
-      <label>Before Test Pumping (KShs, flat)<input type="number" id="dq-testpumpflat" step="0.01"></label>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-vat',this)"><span class="dq-sec-arrow open">&#9654;</span> VAT &amp; Payment</h4>
+    <div id="dq-sec-vat">
+      <div class="dq-row4">
+        <label>VAT Rate (%)<input type="number" id="dq-vat" step="0.1"></label>
+        <label>Deposit (%)<input type="number" id="dq-depositpct" step="0.1"></label>
+        <label>Before Test Pumping (KShs, flat)<input type="number" id="dq-testpumpflat" step="0.01"></label>
+      </div>
     </div>
 
-    <h4 style="margin:16px 0 4px">Sign-off</h4>
-    <div class="dq-row4">
-      <label>Prepared By<input type="text" id="dq-preparedby"></label>
-      <label>Reviewed By<input type="text" id="dq-reviewedby"></label>
-      <label>Approved By<input type="text" id="dq-approvedby"></label>
+    <h4 class="dq-sec-hdr" onclick="dqToggleSection('dq-sec-signoff',this)"><span class="dq-sec-arrow">&#9654;</span> Sign-off</h4>
+    <div id="dq-sec-signoff" style="display:none">
+      <div class="dq-row4">
+        <label>Prepared By<input type="text" id="dq-preparedby"></label>
+        <label>Reviewed By<input type="text" id="dq-reviewedby"></label>
+        <label>Approved By<input type="text" id="dq-approvedby"></label>
+      </div>
     </div>
 
     <div id="dq-preview" class="dq-preview" style="display:none"></div>
@@ -1706,6 +1856,36 @@ function showTab(name, btn) {
   }
 }
 
+// Tower/Drilling/Solar Pricing live under one "Pricing" tab-bar entry with a dropdown, instead
+// of three separate tabs — the trigger button itself is what showTab() marks .active (so it
+// lights up whenever any pricing pane is open), and its label updates to name which one.
+var PRICING_LABELS = { towers: '&#127959;&#65039; Tower Pricing', drilling: '&#9935;&#65039; Drilling Pricing', solar: '&#9728;&#65039; Solar Pricing' };
+function togglePricingMenu(ev) {
+  ev.stopPropagation();
+  var menu = document.getElementById('pricingMenu');
+  if (menu.classList.contains('open')) { menu.classList.remove('open'); return; }
+  var rect = document.getElementById('pricingTabBtn').getBoundingClientRect();
+  menu.style.left = rect.left + 'px';
+  menu.style.top = (rect.bottom + 4) + 'px';
+  menu.classList.add('open');
+}
+function showPricingTab(name, itemBtn) {
+  var triggerBtn = document.getElementById('pricingTabBtn');
+  showTab(name, triggerBtn);
+  triggerBtn.innerHTML = PRICING_LABELS[name] + ' &#9662;';
+  document.querySelectorAll('#pricingMenu button').forEach(function(b){ b.classList.remove('pricing-item-active'); });
+  itemBtn.classList.add('pricing-item-active');
+  document.getElementById('pricingMenu').classList.remove('open');
+}
+document.addEventListener('click', function(e) {
+  var menu = document.getElementById('pricingMenu');
+  if (menu && menu.classList.contains('open') && !e.target.closest('.tab-dropdown')) menu.classList.remove('open');
+});
+window.addEventListener('scroll', function() {
+  var menu = document.getElementById('pricingMenu');
+  if (menu) menu.classList.remove('open');
+}, true);
+
 function fmtCatalogTime(ts) {
   if (!ts) return 'never';
   return new Date(Number(ts)).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi', dateStyle: 'medium', timeStyle: 'short' });
@@ -1826,13 +2006,15 @@ function backToContacts() {
 }
 
 function filterContacts(q) {
-  var query       = q.toLowerCase();
+  var query       = q.toLowerCase().trim();
   var activeDomain = (document.querySelector('.wa-filt.wa-filt-active') || {id:'filt-all'}).id.replace('filt-','');
+  // Splitting into words and requiring every word to match (in any order, anywhere in the
+  // conversation) makes multi-word searches like a full name work, not just exact substrings.
+  var terms = query ? query.split(/\s+/) : [];
   document.querySelectorAll('.wa-contact').forEach(function(c) {
-    var phone   = (c.dataset.phone || '').toLowerCase();
-    var preview = (c.querySelector('.wa-ct-prev') ? c.querySelector('.wa-ct-prev').textContent : '').toLowerCase();
+    var blob    = (c.dataset.search || c.dataset.phone || '').toLowerCase();
     var domain  = c.dataset.domain || 'general';
-    var matchSearch = query === '' || phone.includes(query) || preview.includes(query);
+    var matchSearch = terms.length === 0 || terms.every(function(t) { return blob.includes(t); });
     var matchDomain = activeDomain === 'all' || domain === activeDomain;
     c.style.display = (matchSearch && matchDomain) ? '' : 'none';
   });
@@ -2589,6 +2771,29 @@ async function downloadSolarQuote() {
   } catch (err) { toast('Could not download quote: ' + err.message, 'err'); }
 }
 
+async function generateAnalysisReport() {
+  var btn = document.getElementById('genAnalysisBtn');
+  var status = document.getElementById('genAnalysisStatus');
+  btn.disabled = true;
+  status.textContent = 'Reading conversations and writing the report — this takes 30–60 seconds...';
+  try {
+    var r = await fetch('/admin/api/analysis/generate', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).error || 'Failed');
+    var blob = await r.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'Waterlift Conversation Analysis - ' + new Date().toISOString().slice(0, 10) + '.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    status.textContent = 'Report downloaded.';
+  } catch (err) {
+    status.textContent = '';
+    toast('Could not generate report: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function sendSolarQuote() {
   var payload = buildSolarPayload();
   var phone = document.getElementById('sq-phone').value.trim();
@@ -2700,6 +2905,19 @@ async function deleteSolarLineItem(id) {
 function toggleSolarTier(tierKey, headingEl) {
   var box = document.getElementById('solar-tier-items-' + tierKey);
   var arrow = headingEl.querySelector('.solar-tier-arrow');
+  var open = box.style.display !== 'none';
+  box.style.display = open ? 'none' : '';
+  arrow.classList.toggle('open', !open);
+}
+
+// Generic collapsible-section toggle for the Drilling Quote modal — same show/hide-by-id
+// pattern as toggleSolarTier above, just not tied to one specific tier. Each section's outer
+// div is a separate element from any inner .dq-costing-only/.dq-mob-calc-only wrapper it
+// contains, so this collapse and the rate/mobilization-method toggles never fight over the
+// same display style — both just have to agree something's visible for it to actually show.
+function dqToggleSection(id, headingEl) {
+  var box = document.getElementById(id);
+  var arrow = headingEl.querySelector('.dq-sec-arrow');
   var open = box.style.display !== 'none';
   box.style.display = open ? 'none' : '';
   arrow.classList.toggle('open', !open);
@@ -3254,7 +3472,7 @@ function renderSingleMsg(msg, pid) {
     var src = 'data:'+((imgBlock.source&&imgBlock.source.media_type)||'image/jpeg')+';base64,'+((imgBlock.source&&imgBlock.source.data)||'');
     return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in wa-img-bubble">' +
       quote +
-      '<img class="wa-img" src="'+src+'" alt="Photo from customer" loading="lazy"/>' +
+      '<img class="wa-img" src="'+src+'" alt="Photo from customer" loading="lazy" onclick="openLightbox(this.src)"/>' +
       (capBlock ? '<div class="wa-img-cap">'+clientEsc(capBlock.text)+'</div>' : '') +
       '<span class="wa-ts">'+t+'</span></div>'+clientReplyBtnHtml(msg.waMessageId, '📷 Photo', 'customer', paused)+'</div>';
   }
@@ -3373,6 +3591,29 @@ async function pollUpdates() {
   } catch(e) { console.error('[poll]', e); }
 }
 
+// ── Theme toggle ──────────────────────────────────────────────────────────
+// The actual <html data-theme> attribute is set synchronously in an inline <head> script
+// (before first paint, to avoid a flash of the wrong theme) — this just keeps the topbar
+// button's icon in sync and handles the explicit toggle + persistence.
+function currentEffectiveTheme() {
+  var explicit = document.documentElement.getAttribute('data-theme');
+  if (explicit === 'dark' || explicit === 'light') return explicit;
+  return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+function updateThemeToggleIcon() {
+  var btn = document.getElementById('themeToggleBtn');
+  if (!btn) return;
+  var dark = currentEffectiveTheme() === 'dark';
+  btn.innerHTML = dark ? '&#9728;&#65039;' : '&#127769;';
+  btn.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
+}
+function toggleTheme() {
+  var next = currentEffectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('waterlift-theme', next); } catch (e) {}
+  updateThemeToggleIcon();
+}
+
 function toggleStats() {
   var bar = document.getElementById('statsBar');
   var btn = document.getElementById('statsToggleBtn');
@@ -3422,6 +3663,18 @@ function closeDevicesModal() {
   document.getElementById('devicesOverlay').style.display = 'none';
 }
 
+function openLightbox(src) {
+  document.getElementById('lightboxImg').src = src;
+  document.getElementById('imgLightbox').classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('imgLightbox').classList.remove('open');
+  document.getElementById('lightboxImg').src = '';
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeLightbox();
+});
+
 async function revokeDevice(sessionId, btn) {
   if (!confirm('Log out this device? It will need to sign in again.')) return;
   btn.disabled = true; btn.textContent = '...';
@@ -3448,6 +3701,7 @@ window.addEventListener('DOMContentLoaded', function() {
       document.getElementById('statsToggleBtn').innerHTML = '&#128202; Show Stats';
     }
   } catch(e) {}
+  updateThemeToggleIcon();
   updateBellUI();
   autoResubscribePush();
   pollUpdates();
@@ -3728,28 +3982,6 @@ function csvCell(v) {
 // into one readable line — shared by the bulk conversation CSV and the per-chat transcript
 // download. tool_result blocks are internal plumbing (Claude's own tool-call bookkeeping) and
 // carry nothing useful for a human reading the conversation, so they're skipped.
-function extractMessageText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.map(block => {
-    if (block.type === 'text') return block.text;
-    if (block.type === 'image') {
-      return block.source
-        ? '[Photo from customer]' + (block.caption ? ': ' + block.caption : '')
-        : '[Photo sent: ' + (block.filename || '') + ']' + (block.caption ? ' — ' + block.caption : '');
-    }
-    if (block.type === 'document') return '[Document sent: ' + (block.filename || '') + ']' + (block.caption ? ' — ' + block.caption : '');
-    if (block.type === 'video') return '[Video from customer]';
-    if (block.type === 'tool_use') return '[Tool used: ' + block.name + ']';
-    return '';
-  }).filter(Boolean).join(' ');
-}
-
-function senderLabel(role, source) {
-  if (role === 'user') return 'Customer';
-  return source === 'human' ? 'Human Agent' : 'AI Agent';
-}
-
 // Bulk export of every message across every conversation, joined with lead outcome — for
 // spotting conversion patterns in a spreadsheet (filter/pivot by domain, lead status, message
 // count, etc.), as opposed to the per-conversation transcript below which is for reading one
@@ -4305,6 +4537,27 @@ app.post('/admin/api/quotes/solar/download', async (req, res) => {
     res.send(buffer);
   } catch (err) {
     console.error('[admin] Solar quote PDF generation error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-triggered "why aren't leads converting" report: reads every conversation to date,
+// computes deterministic stats, hands them plus a curated pool of real transcript excerpts to
+// Claude (forced structured tool-call, see conversationAnalysis.js), and renders the result into
+// the same branded PDF style as the manual reports built earlier. Takes 30-60s (LLM call), so
+// this is a plain synchronous request like the quote-download routes, not a background job —
+// consistent with how this app has no job queue infra to spare on cPanel shared hosting.
+app.post('/admin/api/analysis/generate', async (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  try {
+    const { stats, narrative, generatedAt } = await generateFullReport();
+    const buffer = await generateConversationAnalysisPDF({ stats, narrative, generatedAt });
+    const safeName = 'conversation-analysis-' + new Date(generatedAt).toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error('[admin] Conversation analysis report error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

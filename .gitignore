@@ -1,3 +1,8 @@
 .env
 node_modules/
 data/uploads/
+
+# Conversation exports from the admin dashboard's "Export CSV" button (Chats tab) — contains
+# real customer phone numbers and message content. A past version of this file was committed
+# and briefly exposed on the public repo; never commit these again.
+waterlift-conversations-*.csv

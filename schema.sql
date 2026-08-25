@@ -97,6 +97,14 @@ CREATE TABLE IF NOT EXISTS escalations (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 2026-08: escalations had no phone column, so an escalation raised without the model also
+-- calling qualify_lead was unlinkable to any real conversation (analysis found 70% of
+-- escalations fell into this gap). Unlike other additions in this file, phone belongs on this
+-- existing table itself rather than in a new one, so this is a genuine ALTER TABLE for once —
+-- kept idempotent via IF NOT EXISTS (MySQL 8.0.29+ / MariaDB 10.3+) so re-importing this file
+-- stays safe on installs that already have the column.
+ALTER TABLE escalations ADD COLUMN IF NOT EXISTS phone VARCHAR(30) DEFAULT NULL AFTER customer_name;
+
 -- Browser push subscriptions for the admin dashboard (one row per installed device)
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id            INT UNSIGNED NOT NULL AUTO_INCREMENT,

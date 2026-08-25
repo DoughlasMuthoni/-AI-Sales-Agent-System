@@ -2,7 +2,7 @@ const toolDefinitions = [
   {
     name: 'qualify_lead',
     description:
-      'Capture and store lead qualification data after the prospect has shared their key details. Call this once you have collected name, phone, location, service interest, and property type.',
+      'Capture and store lead qualification data. Call this as soon as you have name and phone — the two fields the sales team actually needs to follow up — even if location/service/property type aren\'t known yet (e.g. mid-complaint, before a full qualification chat). Include the other fields whenever they are known; do not wait to collect all of them before calling this.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -28,7 +28,7 @@ const toolDefinitions = [
           description: 'Any other useful context about the prospect or their request worth passing to the sales team (optional)',
         },
       },
-      required: ['name', 'phone', 'location', 'service', 'property_type'],
+      required: ['name', 'phone'],
     },
   },
   {
@@ -160,7 +160,7 @@ const toolDefinitions = [
   {
     name: 'escalate_to_human',
     description:
-      'Flag this conversation for immediate human agent takeover. Use for complaints, legal questions, negotiated pricing, large commercial projects, or any situation beyond standard sales consultation.',
+      'Flag this conversation for immediate human agent takeover. Use for complaints, legal questions, negotiated pricing, large commercial projects, or any situation beyond standard sales consultation. The customer\'s WhatsApp number is captured automatically — but if you don\'t already have their name (e.g. via qualify_lead earlier in this chat), ask for it first before escalating, unless the customer is upset or the situation is urgent enough that asking first would make things worse, in which case escalate immediately and let the human follow-up gather the rest.',
     inputSchema: {
       type: 'object',
       properties: {

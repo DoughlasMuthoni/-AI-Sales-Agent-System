@@ -398,8 +398,10 @@ async function insertLead(lead) {
     `INSERT INTO leads (name, phone, location, service, property_type, estimated_budget, notes, status, captured_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
     [
-      lead.name, lead.phone, lead.location, lead.service,
-      lead.property_type, lead.estimated_budget || null, lead.notes || null,
+      // location/service/property_type are optional on qualify_lead (e.g. mid-complaint
+      // escalations rarely have all of them) — default to null since mysql2 rejects undefined.
+      lead.name, lead.phone, lead.location || null, lead.service || null,
+      lead.property_type || null, lead.estimated_budget || null, lead.notes || null,
       new Date(lead.capturedAt),
     ]
   );
@@ -449,9 +451,9 @@ async function getAllCallbacks() {
 
 async function insertEscalation(esc) {
   await pool.query(
-    `INSERT INTO escalations (customer_name, urgency, reason, escalated_at)
-     VALUES (?, ?, ?, ?)`,
-    [esc.customer_name || null, esc.urgency, esc.reason, new Date(esc.escalatedAt)]
+    `INSERT INTO escalations (customer_name, phone, urgency, reason, escalated_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [esc.customer_name || null, esc.phone || null, esc.urgency, esc.reason, new Date(esc.escalatedAt)]
   );
 }
 

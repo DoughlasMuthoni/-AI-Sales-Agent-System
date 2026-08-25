@@ -62,12 +62,13 @@ async function sendCallbackNotification(booking) {
 async function sendEscalationNotification(record) {
   const urgencyColor = record.urgency === 'high' ? '#dc2626' : record.urgency === 'medium' ? '#f59e0b' : '#6b7280';
   const urgencyIcon  = record.urgency === 'high' ? '🚨' : record.urgency === 'medium' ? '⚠️' : 'ℹ️';
-  const subject = `${urgencyIcon} Escalation [${record.urgency.toUpperCase()}] — ${record.customer_name || 'Unknown'} needs human support`;
+  const subject = `${urgencyIcon} Escalation [${record.urgency.toUpperCase()}] — ${record.customer_name || record.phone || 'Unknown'} needs human support`;
 
   const html = `
     <h2 style="color:${urgencyColor};">${urgencyIcon} Human Takeover Required</h2>
     <table style="border-collapse:collapse;width:100%;font-family:sans-serif;">
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Customer</td><td style="padding:8px;">${record.customer_name || 'Not captured'}</td></tr>
+      <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Phone</td><td style="padding:8px;">${record.phone || 'Not available'}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Urgency</td><td style="padding:8px;color:${urgencyColor};font-weight:bold;">${record.urgency.toUpperCase()}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Reason</td><td style="padding:8px;">${record.reason}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Time</td><td style="padding:8px;">${timestamp()}</td></tr>

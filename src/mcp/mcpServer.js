@@ -411,9 +411,12 @@ const toolHandlers = {
   },
 
   async escalate_to_human(input) {
-    const record = { ...input, escalatedAt: new Date().toISOString() };
+    // _customerPhone is the real WhatsApp wa_id, injected by the pipeline on every tool call —
+    // always store it here so the escalation is linkable to the conversation even when the
+    // model didn't also call qualify_lead (previously the only way a phone got recorded).
+    const record = { ...input, phone: input._customerPhone || null, escalatedAt: new Date().toISOString() };
     await db.insertEscalation(record);
-    console.error('[MCP] ESCALATION:', input.customer_name || '(no name given)', input.urgency);
+    console.error('[MCP] ESCALATION:', input.customer_name || '(no name given)', record.phone, input.urgency);
     sendEscalationNotification(record);
     const urgencyMsg = input.urgency === 'high'
       ? 'A team member will contact you as soon as possible.'
