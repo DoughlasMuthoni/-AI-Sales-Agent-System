@@ -271,17 +271,30 @@ async function callClaudeForNarrative(stats, pools) {
     fmtExamplePool('Conversations where the agent sent the last message and the customer never replied again', pools.quoteThenSilence),
   ].join('\n');
 
-  const response = await anthropic.messages.create({
-    model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-    max_tokens: 6000,
-    tools: [REPORT_TOOL],
-    tool_choice: { type: 'tool', name: 'submit_analysis_report' },
-    messages: [{ role: 'user', content: promptText }],
-  });
-
-  const toolUse = response.content.find(b => b.type === 'tool_use' && b.name === 'submit_analysis_report');
-  if (!toolUse) throw new Error('Claude did not return a structured report — try again.');
-  return toolUse.input;
+  // Observed in production: this single call occasionally fails and then succeeds on a manual
+  // retry (data volume has grown well past what this was last tested against, so the call is
+  // slower/heavier now) — retry automatically here instead of making the admin click twice.
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await anthropic.messages.create({
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 6000,
+        tools: [REPORT_TOOL],
+        tool_choice: { type: 'tool', name: 'submit_analysis_report' },
+        messages: [{ role: 'user', content: promptText }],
+      });
+      const toolUse = response.content.find(b => b.type === 'tool_use' && b.name === 'submit_analysis_report');
+      if (!toolUse) throw new Error('Claude did not return a structured report.');
+      return toolUse.input;
+    } catch (err) {
+      lastErr = err;
+      console.error(`[conversationAnalysis] Attempt ${attempt}/${MAX_ATTEMPTS} failed:`, err.message);
+      if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, attempt * 1500));
+    }
+  }
+  throw new Error(`Report generation failed after ${MAX_ATTEMPTS} attempts: ${lastErr.message}`);
 }
 
 // ── Orchestrator ────────────────────────────────────────────────────────────

@@ -234,7 +234,7 @@ When a tool sends a reply directly to the customer (e.g. `show_products` falling
 |---|---|
 | `qualify_lead` | Captures name, phone, location, service, property type, and optional notes — writes to `leads` and sends an email notification |
 | `send_quote` | Generates indicative price ranges/prices for solar systems, borehole rehabilitation, and elevated steel water towers (partial tower details still return a real min–max range rather than stalling on more questions). **New borehole drilling never gets a numeric price in chat** — it always defers to `schedule_callback` since real drilling cost depends on a site assessment; the detailed engineered quote is generated admin-side (see PDF Quotations below) |
-| `schedule_callback` | Books a site visit or consultation — writes to `callbacks` and sends an email notification |
+| `schedule_callback` | Books a call with an expert (the agent never books site visits itself — it only tells the customer a site visit is free once an expert call is booked) — writes to `callbacks` and sends an email notification |
 | `escalate_to_human` | Flags the conversation for the sales team — writes to `escalations` and sends an email notification |
 | `show_products` | Sends WhatsApp interactive product cards from the live-synced product catalog (single item, curated list, or full catalog browse) |
 | `get_product_info` | Looks up current price/spec/description for a specific product from the live `products` table (FULLTEXT + LIKE search) — Claude never quotes a catalog price from memory |

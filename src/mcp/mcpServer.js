@@ -114,7 +114,7 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
         `Steel structure/fabrication price ONLY (excludes foundation and tank) for a ${pkg.height}m elevated steel water tower${location ? ' (' + location + ')' : ''}:\n` +
         `💰 KShs ${pkg.fabricationPrice.toLocaleString()}\n\n` +
         `This is the tower structure alone — foundation and tank are priced separately (ask for the complete package price to see the full installed total). ` +
-        `Final price is confirmed after a site visit. Prices valid 30 days.`
+        `Final price is confirmed by our technical team. Prices valid 30 days.`
       );
     }
     const foundationPrice = foundationPrices[pkg.foundation.toLowerCase()];
@@ -125,7 +125,7 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
       `💰 KShs ${total.toLocaleString()}\n\n` +
       `Includes the steel super structure, ${pkg.foundation} foundation, and the tank(s) — inclusive of 16% VAT and standard installation. ` +
       `Transport to site is quoted separately based on distance and accessibility. ` +
-      `Final price is confirmed after a site visit (soil test determines Pad vs Raft foundation). Prices valid 30 days.`
+      `Final price is confirmed by our technical team (soil condition determines Pad vs Raft foundation). Prices valid 30 days.`
     );
   }
 
@@ -175,7 +175,7 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
       `💰 KShs ${min.toLocaleString()}${min === max ? '' : ' – KShs ' + max.toLocaleString()}\n\n` +
       (min === max
         ? `Includes the steel super structure, foundation, and tank(s) — inclusive of 16% VAT and standard installation. `
-        : `The exact price depends on tank capacity/count and foundation type (confirmed on site visit) — share those and I'll narrow it to a precise figure. `) +
+        : `The exact price depends on tank capacity/count and foundation type (confirmed by our technical team) — share those and I'll narrow it to a precise figure. `) +
       `Transport to site is quoted separately based on distance and accessibility. Prices valid 30 days.`
     );
   }
@@ -187,7 +187,7 @@ async function getTowerQuote(tower_height_m, tank_count, tank_type, tank_capacit
   const foundationPrice = foundationPrices[foundationGuess];
 
   const lines = [`This is a custom tower/tank combination outside our standard packages${location ? ' (' + location + ')' : ''} — here's an indicative breakdown:`];
-  if (foundationPrice) lines.push(`Foundation (likely ${foundationGuess === 'raft' ? 'Raft' : 'Pad'}, confirmed on site visit): KShs ${foundationPrice.toLocaleString()}`);
+  if (foundationPrice) lines.push(`Foundation (likely ${foundationGuess === 'raft' ? 'Raft' : 'Pad'}, confirmed by our technical team): KShs ${foundationPrice.toLocaleString()}`);
   if (tankInfo) lines.push(`${tankInfo.label}: KShs ${tankInfo.price.toLocaleString()} each${count ? ' x ' + count : ''}`);
   lines.push('The super structure cost also scales with height and tank load — for an exact total, use schedule_callback so our team can prepare a tailored proposal.');
   return lines.join('\n');
@@ -245,7 +245,9 @@ async function getTowerQuoteBreakdown(tower_height_m, tank_count, tank_type, tan
 async function getSolarQuote(system_size_kw, location, property_type, system_type) {
   const kw = system_size_kw || 5;
   const type = (system_type || 'backup').toLowerCase();
-  const prop = property_type || 'residential';
+  // Schools/churches/hospitals have no rate table of their own — their loads and system sizes
+  // are commercial-scale, so price them as commercial rather than falling back to residential.
+  const prop = property_type === 'institutional' ? 'commercial' : (property_type || 'residential');
 
   if (type.includes('pump') || type.includes('water') && !type.includes('heat')) {
     const ranges = SOLAR_RATES.pumping.any.ranges;
@@ -254,7 +256,7 @@ async function getSolarQuote(system_size_kw, location, property_type, system_typ
       `Indicative price range for a ${kw}kW solar water pumping system${location ? ' (' + location + ')' : ''}:\n` +
       `💰 KShs ${range[2]} – KShs ${range[3]}\n\n` +
       `Includes solar panels, INVT pumping inverter, submersible pump, cabling, and installation. ` +
-      `A site assessment is required for a firm quote.`
+      `Our experts will confirm a firm quote with you.`
     );
   }
 
@@ -279,7 +281,7 @@ async function getSolarQuote(system_size_kw, location, property_type, system_typ
     `💰 KShs ${range[2]} – KShs ${range[3]}\n\n` +
     `Includes solar panels, inverter, batteries (backup systems), mounting, cabling, and installation. ` +
     `${type.includes('grid') ? 'Grid-tied systems can save over 70% on your electricity bill.' : 'Backup systems provide power independence and average 50% electricity savings.'} ` +
-    `A free site survey is conducted before installation. Contact: +254 768 117 070`
+    `Our experts will confirm the final system design with you. Contact: +254 768 117 070`
   );
 }
 
@@ -289,7 +291,7 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
       `Indicative price range for borehole rehabilitation${location ? ' (' + location + ')' : ''}:\n` +
       `💰 KShs ${BOREHOLE_RATES.rehabilitation.min.toLocaleString()} – KShs ${BOREHOLE_RATES.rehabilitation.max.toLocaleString()}\n\n` +
       `Includes deep cleaning, unblocking, pump inspection, and flow optimisation. ` +
-      `Actual cost depends on borehole condition and depth. A site inspection is required first. ` +
+      `Actual cost depends on borehole condition and depth. Our engineers will confirm the exact cost after assessing your borehole with you. ` +
       `Contact: +254 768 117 070`
     );
   }
@@ -301,8 +303,8 @@ function getBoreholeQuote(borehole_depth_m, location, property_type, is_rehabili
   // schedule_callback so the admin team can prepare an accurate quote from a site assessment.
   return (
     `Borehole drilling cost depends heavily on your specific site — depth, ground geology, and distance from our base all affect the price, so a number given in chat here could be significantly off. ` +
-    `What I can do is get one of our drilling engineers to review your location and prepare an accurate written quote for you.\n\n` +
-    `Let's book that — use schedule_callback, or share your location${property_type ? ' and confirm this is for a ' + property_type + ' property' : ''} and I'll arrange it. ` +
+    `What I can do is get one of our drilling engineers to discuss your project and prepare an accurate written quote for you.\n\n` +
+    `Let's book a call with our engineer — use schedule_callback, or share your location${property_type ? ' and confirm this is for a ' + property_type + ' property' : ''} and I'll arrange it. ` +
     `Contact: +254 768 117 070 | info@waterlift.co.ke`
   );
 }
@@ -317,7 +319,7 @@ const toolHandlers = {
     await db.insertLead(lead);
     console.error('[MCP] Lead qualified:', input.name, input.phone);
     sendLeadNotification(lead);
-    return `Lead captured for ${input.name} (${input.location}) — ${input.service} / ${input.property_type}. Our team will follow up at ${input.phone}.`;
+    return `Lead captured for ${input.name}${input.organization ? ' of ' + input.organization : ''} (${input.location}) — ${input.service} / ${input.property_type}. Our team will follow up at ${input.phone}.`;
   },
 
   async schedule_callback(input) {
@@ -325,7 +327,8 @@ const toolHandlers = {
     await db.insertCallback(booking);
     console.error('[MCP] Callback scheduled:', input.name, input.preferred_date);
     sendCallbackNotification(booking);
-    return `Callback confirmed for ${input.name} on ${input.preferred_date} at ${input.preferred_time}. Our consultant will call ${input.phone}. ${input.notes ? 'Notes: ' + input.notes : ''}`;
+    return `Callback confirmed for ${input.name} on ${input.preferred_date} at ${input.preferred_time}. Our consultant will call ${input.phone}. ${input.notes ? 'Notes: ' + input.notes + ' ' : ''}` +
+      `Now that the expert call is booked, let the customer know that if our expert determines a site visit is needed, it is completely free of charge.`;
   },
 
   async send_quote(input) {
@@ -351,6 +354,21 @@ const toolHandlers = {
       return 'WHATSAPP_CATALOG_ID is not set in .env — cannot send product cards. Please add your Catalog ID.';
     }
 
+    // Cards for items with no public price would show "KShs 0" in WhatsApp — drop them.
+    let ids = product_ids || [];
+    let skippedNote = '';
+    if (type !== 'catalog' && ids.length) {
+      const known = await db.getProductsByRetailerIds(ids);
+      const unpriced = known.filter(p => !(Number(p.price) > 0));
+      if (unpriced.length) {
+        const unpricedIds = new Set(unpriced.map(p => String(p.retailer_id)));
+        ids = ids.filter(id => !unpricedIds.has(String(id)));
+        skippedNote = ' Not sent as cards (price on request — the card would show KShs 0): ' + unpriced.map(p => p.name).join(', ') +
+          '. Describe those in text without any price, and hand pricing to the sales team (qualify_lead + escalate_to_human "Price request: ...").';
+        if (!ids.length) return 'No product cards sent.' + skippedNote;
+      }
+    }
+
     try {
       if (type === 'catalog') {
         await sendCatalogMessage(_customerPhone, body_text);
@@ -358,21 +376,21 @@ const toolHandlers = {
       }
 
       if (type === 'single') {
-        const id = product_ids && product_ids[0];
+        const id = ids[0];
         if (!id) return 'No product ID provided. Please specify a product_id to send a single product card.';
         await sendProductMessage(_customerPhone, id, body_text);
-        return 'Product card sent to customer.';
+        return 'Product card sent to customer.' + skippedNote;
       }
 
       if (type === 'list') {
-        if (!product_ids || product_ids.length === 0) {
+        if (ids.length === 0) {
           return 'No product IDs provided. Please specify product_ids for the list.';
         }
-        if (product_ids.length > 30) {
+        if (ids.length > 30) {
           return 'Too many products — WhatsApp supports a maximum of 30 products per list.';
         }
-        await sendProductListMessage(_customerPhone, product_ids, section_title, body_text);
-        return `Product list sent with ${product_ids.length} items under "${section_title || 'Products'}".`;
+        await sendProductListMessage(_customerPhone, ids, section_title, body_text);
+        return `Product list sent with ${ids.length} items under "${section_title || 'Products'}".` + skippedNote;
       }
 
       return 'Unknown product display type. Use: catalog, single, or list.';
@@ -401,13 +419,21 @@ const toolHandlers = {
     if (!query || !query.trim()) return 'No search term provided.';
     const results = await db.searchProducts(query.trim());
     if (!results.length) {
-      return `No products found matching "${query}". Ask the customer for more detail, or offer to check with the team directly.`;
+      return `No products found matching "${query}" in the catalog. It may still be available (some advertised items aren't listed yet) — do NOT tell the customer we don't stock it or invent details. Confirm the exact item and quantity, capture the lead with qualify_lead (noting the item wasn't found in the catalog), and use escalate_to_human with a reason starting "Price request:" so the sales team confirms availability and price.`;
     }
-    return results.map(p => {
-      const price = 'KShs ' + Number(p.price).toLocaleString('en-KE');
+    // Items without a public price (e.g. pool chemicals, water filtration) are stored with
+    // price 0 — never let that reach the customer as "KShs 0" / free.
+    let hasUnpriced = false;
+    const lines = results.map(p => {
+      const unpriced = !(Number(p.price) > 0);
+      if (unpriced) hasUnpriced = true;
+      const price = unpriced ? 'PRICE ON REQUEST' : 'KShs ' + Number(p.price).toLocaleString('en-KE');
       const desc = p.description ? ' — ' + p.description.replace(/\s+/g, ' ').slice(0, 220).trim() : '';
       return `${p.name} — ${price} (ID: ${p.retailer_id})${desc}`;
     }).join('\n');
+    return hasUnpriced
+      ? lines + '\n\nPRICE ON REQUEST items: never state or guess a price (never KShs 0 or free) and do not send their product cards. A sales specialist sends the price — capture the lead with qualify_lead and use escalate_to_human with a reason starting "Price request:" listing the items and quantities.'
+      : lines;
   },
 
   async escalate_to_human(input) {

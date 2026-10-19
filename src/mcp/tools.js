@@ -6,18 +6,22 @@ const toolDefinitions = [
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: "Prospect's full name" },
+        name: { type: 'string', description: "Prospect's full name (the contact person)" },
+        organization: {
+          type: 'string',
+          description: 'Name of the school, church, hospital, company or other institution the prospect is enquiring for (e.g. "Uruku Secondary School"). Always include it when known — required in practice for school/institutional leads.',
+        },
         phone: { type: 'string', description: "Prospect's phone number with country code" },
         location: { type: 'string', description: 'City, town, or region where the property is located' },
         service: {
           type: 'string',
-          enum: ['solar', 'borehole'],
-          description: 'Which service the prospect is interested in',
+          enum: ['solar', 'borehole', 'water'],
+          description: 'Which service the prospect is interested in — water = swimming pool chemicals or water filtration/treatment',
         },
         property_type: {
           type: 'string',
-          enum: ['residential', 'commercial', 'agricultural'],
-          description: 'Type of property',
+          enum: ['residential', 'commercial', 'agricultural', 'institutional'],
+          description: 'Type of property — use institutional for schools, churches, hospitals and similar',
         },
         estimated_budget: {
           type: 'string',
@@ -34,7 +38,7 @@ const toolDefinitions = [
   {
     name: 'schedule_callback',
     description:
-      'Book a callback or site visit with a technical consultant. Use when the prospect is ready to speak to an expert or schedule an on-site assessment.',
+      'Book a call with one of our technical experts. Use when the prospect is ready to speak to an expert or needs a firm quote. Never use this to book a site visit — our expert decides on (and arranges) any site visit after the call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -106,7 +110,7 @@ const toolDefinitions = [
         location: { type: 'string', description: 'County or town in Kenya' },
         property_type: {
           type: 'string',
-          enum: ['residential', 'commercial', 'agricultural'],
+          enum: ['residential', 'commercial', 'agricultural', 'institutional'],
           description: 'Type of property',
         },
       },

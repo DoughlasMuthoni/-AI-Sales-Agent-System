@@ -20,14 +20,15 @@ function timestamp() {
 }
 
 async function sendLeadNotification(lead) {
-  const subject = `🟡 New Lead — ${lead.name} (${lead.service === 'solar' ? 'Solar' : 'Borehole'}, ${lead.location})`;
+  const subject = `🟡 New Lead — ${lead.name} (${lead.service === 'solar' ? 'Solar' : lead.service === 'water' ? 'Pool & Water Treatment' : 'Borehole'}, ${lead.location})`;
 
   const html = `
     <h2 style="color:#f59e0b;">🟡 New Qualified Lead</h2>
     <table style="border-collapse:collapse;width:100%;font-family:sans-serif;">
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Name</td><td style="padding:8px;">${lead.name}</td></tr>
+      ${lead.organization ? `<tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">School / Organization</td><td style="padding:8px;">${lead.organization}</td></tr>` : ''}
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Phone</td><td style="padding:8px;">${lead.phone}</td></tr>
-      <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Service</td><td style="padding:8px;">${lead.service === 'solar' ? '☀️ Solar' : '💧 Borehole'}</td></tr>
+      <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Service</td><td style="padding:8px;">${lead.service === 'solar' ? '☀️ Solar' : lead.service === 'water' ? '🏊 Pool & Water Treatment' : '💧 Borehole'}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Location</td><td style="padding:8px;">${lead.location}</td></tr>
       <tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Property</td><td style="padding:8px;">${lead.property_type}</td></tr>
       ${lead.estimated_budget ? `<tr><td style="padding:8px;background:#f9f9f9;font-weight:bold;">Budget</td><td style="padding:8px;">${lead.estimated_budget}</td></tr>` : ''}

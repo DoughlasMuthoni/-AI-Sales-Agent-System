@@ -265,100 +265,6 @@ function lastMsg(messages) {
   return 'Message';
 }
 
-function quoteBoxHtml(replyContext) {
-  if (!replyContext) return '';
-  const label = replyContext.sender === 'customer' ? 'Customer' : replyContext.sender === 'human' ? 'You' : 'AI Agent';
-  return '<div class="wa-quote"><span class="wa-quote-sender">' + esc(label) + '</span>' + esc(replyContext.preview || '') + '</div>';
-}
-
-function replyBtnHtml(waMessageId, preview, sender, paused) {
-  if (!waMessageId) return '';
-  return '<button type="button" class="wa-reply-btn" title="Reply" ' + (paused ? '' : 'disabled ') +
-    'data-wa-id="' + esc(waMessageId) + '" data-preview="' + esc(preview || '') + '" data-sender="' + esc(sender) + '" ' +
-    'onclick="startReply(this)">&#8617;</button>';
-}
-
-function renderMessages(messages, paused) {
-  return (messages || []).map(msg => {
-    const t = fmtTime(msg.ts);
-    const idAttr = ' data-msg-id="' + (msg.id || 0) + '"';
-    const quote = quoteBoxHtml(msg.replyContext);
-    if (msg.source === 'system') return '';
-    if (typeof msg.content === 'string') {
-      return '<div class="wa-row wa-row-in"' + idAttr + '>' +
-        '<div class="wa-bubble wa-in">' + quote + esc(msg.content) +
-        '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, msg.content, 'customer', paused) + '</div>';
-    }
-    if (!Array.isArray(msg.content)) return '';
-    const imgBlock = msg.content.find(b => b.type === 'image');
-    if (imgBlock && msg.role === 'user') {
-      const capBlock = msg.content.find(b => b.type === 'text');
-      const src = 'data:' + (imgBlock.source?.media_type || 'image/jpeg') + ';base64,' + (imgBlock.source?.data || '');
-      return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in wa-img-bubble">' +
-        quote +
-        '<img class="wa-img" src="' + src + '" alt="Photo from customer" loading="lazy" onclick="openLightbox(this.src)"/>' +
-        (capBlock ? '<div class="wa-img-cap">' + esc(capBlock.text) + '</div>' : '') +
-        '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, '📷 Photo', 'customer', paused) + '</div>';
-    }
-    const vidBlock = msg.content.find(b => b.type === 'video');
-    if (vidBlock && msg.role === 'user') {
-      const capBlock = msg.content.find(b => b.type === 'text');
-      const src = '/admin/api/documents/' + encodeURIComponent(vidBlock.storedAs);
-      return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in wa-img-bubble">' +
-        quote +
-        '<video class="wa-img" src="' + src + '" controls preload="metadata"></video>' +
-        (capBlock ? '<div class="wa-img-cap">' + esc(capBlock.text) + '</div>' : '') +
-        '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, '🎥 Video', 'customer', paused) + '</div>';
-    }
-    return msg.content.map(block => {
-      if (block.type === 'text' && msg.role === 'assistant') {
-        const human = msg.source === 'human';
-        return '<div class="wa-row wa-row-out"' + idAttr + '>' +
-          '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + '">' +
-          '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          quote + esc(block.text) +
-          '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
-          '</div>' + replyBtnHtml(msg.waMessageId, block.text, human ? 'human' : 'ai', paused) + '</div>';
-      }
-      if (block.type === 'tool_use') {
-        return '<div class="wa-row wa-row-center"' + idAttr + '>' +
-          '<div class="wa-system">&#128295; ' + esc(block.name) + '</div></div>';
-      }
-      if (block.type === 'document') {
-        const human = msg.source === 'human';
-        const docInner = '<span class="wa-doc-icon">&#128196;</span><span class="wa-doc-name">' + esc(block.filename) + '</span>';
-        const docHtml = block.storedAs
-          ? '<a class="wa-doc" href="/admin/api/documents/' + encodeURIComponent(block.storedAs) + '" target="_blank" rel="noopener">' + docInner + '</a>'
-          : '<div class="wa-doc">' + docInner + '</div>';
-        return '<div class="wa-row wa-row-out"' + idAttr + '>' +
-          '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + ' wa-doc-bubble">' +
-          '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          quote + docHtml +
-          (block.caption ? '<div class="wa-doc-cap">' + esc(block.caption) + '</div>' : '') +
-          '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
-          '</div>' + replyBtnHtml(msg.waMessageId, '📄 ' + block.filename, human ? 'human' : 'ai', paused) + '</div>';
-      }
-      if (block.type === 'image' && msg.role === 'assistant') {
-        const human = msg.source === 'human';
-        const src = '/admin/api/documents/' + encodeURIComponent(block.storedAs);
-        return '<div class="wa-row wa-row-out"' + idAttr + '>' +
-          '<div class="wa-bubble wa-out' + (human ? ' wa-human' : '') + ' wa-img-bubble">' +
-          '<span class="wa-sender">' + (human ? '&#128100; Human Agent' : '&#129302; AI Agent') + '</span>' +
-          quote +
-          '<a href="' + src + '" target="_blank" rel="noopener"><img class="wa-img" src="' + src + '" alt="Photo sent to customer" loading="lazy"/></a>' +
-          (block.caption ? '<div class="wa-img-cap">' + esc(block.caption) + '</div>' : '') +
-          '<span class="wa-ts">' + t + ' <span class="wa-tick">&#10003;&#10003;</span></span>' +
-          '</div>' + replyBtnHtml(msg.waMessageId, '📷 Photo', human ? 'human' : 'ai', paused) + '</div>';
-      }
-      if (block.type === 'text' && msg.role === 'user') {
-        return '<div class="wa-row wa-row-in"' + idAttr + '><div class="wa-bubble wa-in">' + quote + esc(block.text) +
-          '<span class="wa-ts">' + t + '</span></div>' + replyBtnHtml(msg.waMessageId, block.text, 'customer', paused) + '</div>';
-      }
-      return '';
-    }).join('');
-  }).join('');
-}
-
 // ── Admin page ────────────────────────────────────────────────────────────────
 
 const DRILLING_SETTING_LABELS = {
@@ -388,6 +294,41 @@ const SOLAR_SETTING_LABELS = {
   vat_rate_pct: 'VAT Rate on Non-Solar Items (%)',
 };
 
+// Date-range dropdown + Export CSV button shared by the Leads and Callbacks tabs. The same
+// selection also filters the on-screen table (rows in #<p>-list carrying data-ts). `p` prefixes
+// the element ids so several pickers can live on one page; exportRangeCsv() (client-side)
+// turns the selection into ?from/?to (YYYY-MM-DD, inclusive) on `url`.
+function exportRangePicker(p, url) {
+  return (
+    '<select id="' + p + '-range" onchange="onExportRangeChange(\'' + p + '\')" style="padding:6px 8px;border-radius:8px;border:1px solid var(--border-2);background:var(--bg-1);color:inherit">' +
+      '<option value="all">All time</option><option value="today">Today</option>' +
+      '<option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option>' +
+      '<option value="thismonth">This month</option><option value="lastmonth">Last month</option>' +
+      '<option value="custom">Custom range&hellip;</option>' +
+    '</select>' +
+    '<span id="' + p + '-custom" hidden>' +
+      '<input type="date" id="' + p + '-from" title="From (inclusive)" onchange="applyRangeFilter(\'' + p + '\')"> &ndash; ' +
+      '<input type="date" id="' + p + '-to" title="To (inclusive)" onchange="applyRangeFilter(\'' + p + '\')">' +
+    '</span>' +
+    '<span id="' + p + '-count" class="muted" style="font-size:.8rem"></span>' +
+    '<button class="export-btn" type="button" onclick="exportRangeCsv(\'' + p + '\',\'' + url + '\')">&#11015;&#65039; Export CSV</button>'
+  );
+}
+
+// Parses ?from/?to (YYYY-MM-DD, inclusive) as Kenya calendar days (EAT = UTC+3, no DST) so
+// "today" means the Nairobi day regardless of server timezone. Returns a row filter + file tag.
+function exportDateRange(query) {
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  const from = ymd.test(query.from || '') ? query.from : null;
+  const to   = ymd.test(query.to || '') ? query.to : null;
+  const fromMs = from ? Date.parse(from + 'T00:00:00+03:00') : -Infinity;
+  const toMs   = to ? Date.parse(to + 'T00:00:00+03:00') + 24 * 60 * 60 * 1000 : Infinity;
+  return {
+    inRange: d => { const t = new Date(d).getTime(); return t >= fromMs && t < toMs; },
+    tag: from || to ? (from || 'start') + '_to_' + (to || 'now') : new Date().toISOString().slice(0, 10),
+  };
+}
+
 function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, productCount, towerPricing, drillingPricing, solarPricing, blockedNumbers, analytics) {
   const entries   = Object.entries(sessions).sort((a, b) => b[1].lastSeen - a[1].lastSeen);
   const now       = new Date().toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' });
@@ -406,16 +347,11 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
         const paused  = !!s.humanTakeover;
         const blocked = blockedSet.has(phone);
         const lead    = leadMap[phone];
-        // Full-conversation search index, not just the latest preview line — the admin should be
-        // able to find a chat by the customer's captured name or anything said earlier in it, not
-        // only by phone number or whatever happens to be the most recent message. All of this
-        // text is already sent to the browser anyway (every conversation's full history is
-        // pre-rendered into its own #chat-{pid} pane on load), so this just makes it searchable.
-        const convoText = (s.messages || [])
-          .filter(m => m.source !== 'system')
-          .map(m => extractMessageText(m.content))
-          .join(' ');
-        const searchBlob = [phone, lead && lead.name, convoText].filter(Boolean).join(' ');
+        // Instant local search covers phone, lead name/school and the preview line; searching
+        // anything said earlier in the conversation goes to the server (filterContacts →
+        // /admin/api/search), since full histories are no longer shipped with the page.
+        const preview = lastMsg(s.lastMessage ? [s.lastMessage] : []);
+        const searchBlob = [phone, lead && lead.name, lead && lead.organization, preview].filter(Boolean).join(' ');
         const displayName = lead && lead.name ? lead.name + ' (' + phone + ')' : phone;
         return (
           '<div class="wa-contact" id="contact-' + pid + '" data-phone="' + esc(phone) + '" data-domain="' + domain + '" data-search="' + esc(searchBlob) + '" onclick="openChat(\'' + pid + '\')">' +
@@ -426,7 +362,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
                 '<span class="wa-ct-time">' + timeAgo(s.lastSeen) + '</span>' +
               '</div>' +
               '<div class="wa-ct-row2">' +
-                '<span class="wa-ct-prev">' + esc(lastMsg(s.messages)) + '</span>' +
+                '<span class="wa-ct-prev">' + esc(preview) + '</span>' +
                 (blocked ? '<span class="wa-ct-badge" title="Blocked — AI does not reply">&#128683;</span>' : '') +
                 (paused ? '<span class="wa-ct-badge">&#128100;</span>' : '') +
                 (s.adReferral ? '<span class="wa-ct-badge" title="Came from a WhatsApp ad">&#128226;</span>' : '') +
@@ -443,7 +379,6 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
     const domain  = s.domain || 'general';
     const paused  = !!s.humanTakeover;
     const blocked = blockedSet.has(phone);
-    const lastId = s.messages.length > 0 ? (s.messages[s.messages.length - 1].id || 0) : 0;
     const lead   = leadMap[phone] || null;
     const quickReplies = [
       ['&#128222; Call within hour', 'Thank you for reaching out! I will have one of our specialists call you within the hour.'],
@@ -454,7 +389,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
       '<button class="wa-qr-btn" onclick="fillReply(\'' + pid + '\',\'' + text.replace(/'/g,"\\'") + '\')">' + label + '</button>'
     ).join('');
     return (
-      '<div class="wa-chat" id="chat-' + pid + '" data-phone="' + esc(phone) + '" data-last-id="' + lastId + '">' +
+      '<div class="wa-chat" id="chat-' + pid + '" data-phone="' + esc(phone) + '" data-last-id="0">' +
         '<div class="wa-chat-hdr">' +
           '<button class="wa-back" onclick="backToContacts()">&#8592;</button>' +
           '<div class="wa-av wa-av-' + domain + ' wa-av-sm">' + getInitials(phone) + '</div>' +
@@ -475,9 +410,9 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
             (paused ? '&#9654; Resume AI' : '&#9646;&#9646; Pause AI') +
           '</button>' +
         '</div>' +
-        '<div class="wa-msgs" id="chatmsgs-' + pid + '">' +
-          renderMessages(s.messages, paused) +
-        '</div>' +
+        // Messages are fetched when the chat is first opened (openChat → fetchNewMessages), so
+        // page load stays fast no matter how many conversations/photos have accumulated.
+        '<div class="wa-msgs" id="chatmsgs-' + pid + '"><div class="wa-msgs-loading">Loading messages&hellip;</div></div>' +
         '<div class="wa-input-area' + (paused ? '' : ' wa-input-locked') + '" id="wa-input-' + pid + '">' +
           (!paused ? '<div class="wa-lock-notice">&#9888;&#65039; Pause AI to reply directly</div>' : '') +
           '<div class="wa-reply-banner" id="rbanner-' + pid + '" style="display:none">' +
@@ -517,9 +452,10 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
     ['Status','Name','Phone','Service','Location','Property','Budget','Notes','Captured',''],
     leads.map(l => {
       const status = l.status || 'new';
-      return '<tr>' +
+      return '<tr data-ts="' + new Date(l.captured_at).getTime() + '">' +
         '<td class="nowrap" data-label="Status">' + statusDropdown(l.id, status) + '</td>' +
-        '<td class="nowrap" data-label="Name"><strong>' + esc(l.name) + '</strong></td>' +
+        '<td class="nowrap" data-label="Name"><strong>' + esc(l.name) + '</strong>' +
+          (l.organization ? '<div class="muted" style="font-size:.78rem">&#127979; ' + esc(l.organization) + '</div>' : '') + '</td>' +
         '<td class="mono nowrap" data-label="Phone"><span class="cell-flex">' + esc(l.phone) +
           '<button type="button" class="copy-btn" data-copy="' + esc(l.phone) + '" onclick="copyToClipboard(this)" title="Copy phone number">&#128203;</button></span></td>' +
         '<td class="nowrap" data-label="Service"><span class="chip chip-' + esc(l.service) + '">' + esc(l.service) + '</span></td>' +
@@ -531,7 +467,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
         '<td class="muted nowrap" data-label="Captured">' + fmtFull(l.captured_at) + '</td>' +
         '<td class="nowrap">' +
           '<button type="button" class="resolve-btn" ' +
-            'data-id="' + l.id + '" data-name="' + esc(l.name) + '" data-phone="' + esc(l.phone) + '" ' +
+            'data-id="' + l.id + '" data-name="' + esc(l.name) + '" data-org="' + esc(l.organization) + '" data-phone="' + esc(l.phone) + '" ' +
             'data-service="' + esc(l.service) + '" data-location="' + esc(l.location) + '" ' +
             'data-property="' + esc(l.property_type) + '" data-budget="' + esc(l.estimated_budget) + '" ' +
             'data-notes="' + esc(l.notes) + '" onclick="openEditLeadModal(this)">Edit</button> ' +
@@ -550,7 +486,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
   const cbHTML = tbl(
     ['Name','Phone','Date','Time','Notes','Booked At'],
     callbacks.map(c =>
-      '<tr><td class="nowrap" data-label="Name"><strong>' + esc(c.name) + '</strong></td>' +
+      '<tr data-ts="' + new Date(c.booked_at).getTime() + '"><td class="nowrap" data-label="Name"><strong>' + esc(c.name) + '</strong></td>' +
       '<td class="mono nowrap" data-label="Phone">' + esc(c.phone) + '</td>' +
       '<td class="nowrap" data-label="Date">' + esc(c.preferred_date) + '</td><td class="nowrap" data-label="Time">' + esc(c.preferred_time) + '</td>' +
       '<td class="wrap-cell" data-label="Notes">' + esc(c.notes||'—') + '</td>' +
@@ -695,14 +631,14 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
         '<td class="nowrap">' +
           '<button type="button" class="resolve-btn" data-id="' + li.id + '" data-tier="' + esc(tier.tier_key) + '" data-category="' + li.category + '" data-name="' + esc(li.name) + '" ' +
             'data-qty="' + esc(li.default_qty) + '" data-rate="' + esc(li.default_rate) + '" data-sort="' + esc(li.sort_order) + '" onclick="openSolarLineItemModal(this)">Edit</button> ' +
-          '<button type="button" class="resolve-btn" onclick="deleteSolarLineItem(' + li.id + ')">Delete</button>' +
+          '<button type="button" class="resolve-btn" onclick="deleteSolarLineItem(' + li.id + ',\'' + esc(tier.tier_key) + '\')">Delete</button>' +
         '</td></tr>'
       ).join(''), '&#9728;&#65039;', 'No line items in this tier yet.');
     const domId = 'solar-tier-items-' + esc(tier.tier_key);
     return (
       '<div class="solar-tier-block">' +
         '<h4 style="margin:16px 0 4px;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleSolarTier(\'' + esc(tier.tier_key) + '\',this)">' +
-          '<span class="solar-tier-arrow">&#9654;</span> ' + esc(tier.label) + ' <span style="font-weight:400;color:#888;font-size:.85rem">(' + items.length + ' items)</span>' +
+          '<span class="solar-tier-arrow">&#9654;</span> ' + esc(tier.label) + ' <span id="solar-tier-count-' + esc(tier.tier_key) + '" style="font-weight:400;color:#888;font-size:.85rem">(' + items.length + ' items)</span>' +
         '</h4>' +
         '<div id="' + domId + '" style="display:none">' +
           '<div class="pane-toolbar">' +
@@ -710,7 +646,7 @@ function buildAdminPage(sessions, leads, callbacks, escalations, adminEmail, pro
             '<button type="button" class="resolve-btn" onclick="event.stopPropagation();deleteSolarTier(\'' + esc(tier.tier_key) + '\')">Delete Tier</button>' +
             '<button type="button" class="export-btn" onclick="event.stopPropagation();openSolarLineItemModal(null,\'' + esc(tier.tier_key) + '\')">&#10133; Add Item</button>' +
           '</div>' +
-          itemsTable +
+          '<div id="solar-tier-table-' + esc(tier.tier_key) + '">' + itemsTable + '</div>' +
         '</div>' +
       '</div>'
     );
@@ -923,6 +859,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .wa-av-sm{width:38px;height:38px;font-size:.75rem}
 .wa-av-solar{background:linear-gradient(135deg,#d97706,#f59e0b)}
 .wa-av-borehole{background:linear-gradient(135deg,#1d4ed8,#3b82f6)}
+.wa-av-water{background:linear-gradient(135deg,#0e7490,#06b6d4)}
 .wa-av-general{background:linear-gradient(135deg,#075E54,#128C7E)}
 
 /* Contact info */
@@ -934,9 +871,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .wa-ct-prev{font-size:.8rem;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 .wa-ct-badge{font-size:.85rem;flex-shrink:0}
 .wa-unread-dot{width:10px;height:10px;background:#25D366;border-radius:50%;flex-shrink:0;box-shadow:0 0 0 2px var(--bg-1)}
-.wa-domain-chip,.wa-chip-solar,.wa-chip-borehole,.wa-chip-general{font-size:.65rem;padding:1px 6px;border-radius:8px;font-weight:600;flex-shrink:0}
+.wa-domain-chip,.wa-chip-solar,.wa-chip-borehole,.wa-chip-water,.wa-chip-general{font-size:.65rem;padding:1px 6px;border-radius:8px;font-weight:600;flex-shrink:0}
 .wa-chip-solar{background:#fef3c7;color:#92400e}
 .wa-chip-borehole{background:#dbeafe;color:#1e40af}
+.wa-chip-water{background:#cffafe;color:#155e75}
 .wa-chip-general{background:#e2e8f0;color:#475569}
 
 /* Right: no-chat */
@@ -965,6 +903,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .wa-action-btn:disabled{opacity:.5;cursor:not-allowed}
 
 /* Messages area */
+.wa-msgs-loading{margin:auto;color:var(--text-2,#94a3b8);font-size:.85rem}
 .wa-msgs{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:4px;
   background-color:var(--wa-wallpaper);
   background-image:var(--wa-wallpaper-pattern);
@@ -1061,6 +1000,7 @@ tr:hover td{background:var(--bg-3)}
 .chip{display:inline-block;padding:3px 9px;border-radius:20px;font-size:.72rem;font-weight:700;text-transform:capitalize}
 .chip-solar{background:#fef3c7;color:#92400e}
 .chip-borehole{background:#dbeafe;color:#1e40af}
+.chip-water{background:#cffafe;color:#155e75}
 .chip-general{background:#f1f5f9;color:#475569}
 .chip-danger{background:#fee2e2;color:#991b1b}
 .chip-warning{background:#fef3c7;color:#92400e}
@@ -1096,6 +1036,7 @@ tr:hover td{background:var(--bg-3)}
   .tbl-cards tbody{display:block}
   .tbl-cards tr{display:block;margin-bottom:10px;padding:10px 12px;border:1px solid var(--border-1);border-radius:10px;background:var(--bg-1)}
   .tbl-cards tr:hover td{background:transparent}
+  .tbl-cards tr[hidden]{display:none}
   .tbl-cards td{display:block;width:auto;max-width:none;min-width:0;border-top:none;border-bottom:1px solid var(--border-1);padding:7px 0}
   .tbl-cards td:last-child{border-bottom:none;padding-bottom:0}
   .tbl-cards td:first-child{padding-top:0}
@@ -1269,6 +1210,7 @@ tr.esc-resolved td{opacity:.45}
         <button class="wa-filt wa-filt-active" id="filt-all" onclick="filterDomain('all')">All</button>
         <button class="wa-filt" id="filt-solar" onclick="filterDomain('solar')">&#9728;&#65039; Solar</button>
         <button class="wa-filt" id="filt-borehole" onclick="filterDomain('borehole')">&#128167; Borehole</button>
+        <button class="wa-filt" id="filt-water" onclick="filterDomain('water')">&#127946; Pool &amp; Water</button>
       </div>
       <div class="wa-contacts">${contactsHTML}</div>
     </div>
@@ -1286,9 +1228,9 @@ tr.esc-resolved td{opacity:.45}
 <div id="pane-leads" class="pane">
   <div class="pane-toolbar">
     <button class="export-btn" type="button" onclick="openAddLeadModal()">&#10133; Add Lead</button>
-    <a class="export-btn" href="/admin/api/leads/export.csv">&#11015;&#65039; Export CSV</a>
+    ${exportRangePicker('le', '/admin/api/leads/export.csv')}
   </div>
-  <div class="pane-scroll">${leadsHTML}</div>
+  <div class="pane-scroll" id="le-list">${leadsHTML}</div>
 </div>
 
 <!-- Add Lead modal -->
@@ -1298,11 +1240,13 @@ tr.esc-resolved td{opacity:.45}
     <form id="addLeadForm" onsubmit="submitAddLead(event)">
       <input type="hidden" id="al-id" value="">
       <label>Name<input type="text" id="al-name" required></label>
+      <label>School / Organization (optional)<input type="text" id="al-org" placeholder="e.g. Uruku Secondary School"></label>
       <label>Phone<input type="text" id="al-phone" required placeholder="e.g. 254712345678"></label>
       <label>Service
         <select id="al-service">
           <option value="solar">Solar</option>
           <option value="borehole">Borehole</option>
+          <option value="water">Pool &amp; Water Treatment</option>
         </select>
       </label>
       <label>Location<input type="text" id="al-location"></label>
@@ -1311,6 +1255,7 @@ tr.esc-resolved td{opacity:.45}
           <option value="residential">Residential</option>
           <option value="commercial">Commercial</option>
           <option value="agricultural">Agricultural</option>
+          <option value="institutional">Institutional (school, church, hospital)</option>
         </select>
       </label>
       <label>Estimated Budget (optional)<input type="text" id="al-budget"></label>
@@ -1362,7 +1307,10 @@ tr.esc-resolved td{opacity:.45}
 
 <!-- Callbacks pane -->
 <div id="pane-cb" class="pane">
-  <div class="pane-scroll">${cbHTML}</div>
+  <div class="pane-toolbar">
+    ${exportRangePicker('cbx', '/admin/api/callbacks/export.csv')}
+  </div>
+  <div class="pane-scroll" id="cbx-list">${cbHTML}</div>
 </div>
 
 <!-- Escalations pane -->
@@ -1749,6 +1697,12 @@ tr.esc-resolved td{opacity:.45}
     <label>Tier Key (used internally, e.g. "15kva" — cannot be changed once created)<input type="text" id="st-keyinput" required></label>
     <label>Label (shown to admin, e.g. "15 kVA")<input type="text" id="st-label" required></label>
     <label>Sort Order<input type="number" id="st-sort" value="0"></label>
+    <label id="st-copy-wrap">Copy line items from (optional — new tier starts as a copy you can then edit)
+      <select id="st-copy">
+        <option value="">— Start empty —</option>
+        ${solarPricing.tiers.map(t => '<option value="' + esc(t.tier_key) + '">' + esc(t.label) + ' (' + (solarItemsByTier[t.tier_key] || []).length + ' items)</option>').join('')}
+      </select>
+    </label>
     <div class="modal-actions">
       <button type="button" class="export-btn" style="background:#94a3b8" onclick="closeSolarTierModal()">Cancel</button>
       <button type="button" class="export-btn" id="st-submit" onclick="submitSolarTier()">Save</button>
@@ -1849,6 +1803,7 @@ function showTab(name, btn) {
   document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
   document.getElementById('pane-' + name).classList.add('active');
   btn.classList.add('active');
+  try { sessionStorage.setItem('adminActiveTab', name); } catch (e) {}
   if (name === 'catalog' && !catalogLoaded) {
     catalogLoaded = true;
     loadCatalogSettings();
@@ -1885,6 +1840,38 @@ window.addEventListener('scroll', function() {
   var menu = document.getElementById('pricingMenu');
   if (menu) menu.classList.remove('open');
 }, true);
+
+// Saves across the dashboard (pricing edits etc.) finish with location.reload(), which used to
+// always land back on the Chats tab. Remember the open tab, expanded solar tiers and scroll
+// position for this browser tab so a reload puts the admin back exactly where they were.
+window.addEventListener('beforeunload', function() {
+  try { sessionStorage.setItem('adminScrollY', String(window.scrollY)); } catch (e) {}
+});
+(function restoreAdminView() {
+  var tab, openTiers, scrollY;
+  try {
+    tab = sessionStorage.getItem('adminActiveTab');
+    openTiers = JSON.parse(sessionStorage.getItem('adminOpenSolarTiers') || '[]');
+    scrollY = Number(sessionStorage.getItem('adminScrollY') || 0);
+  } catch (e) { return; }
+  if (!tab || tab === 'conv' || !document.getElementById('pane-' + tab)) return;
+  var pricingItem = document.querySelector('#pricingMenu button[onclick*="showPricingTab(\\'' + tab + '\\'"]');
+  if (pricingItem) {
+    showPricingTab(tab, pricingItem);
+  } else {
+    var tabBtn = document.querySelector('.tab[onclick*="showTab(\\'' + tab + '\\'"]');
+    if (!tabBtn) return;
+    showTab(tab, tabBtn);
+  }
+  openTiers.forEach(function (key) {
+    var box = document.getElementById('solar-tier-items-' + key);
+    if (!box) return;
+    box.style.display = '';
+    var arrow = box.parentNode.querySelector('.solar-tier-arrow');
+    if (arrow) arrow.classList.add('open');
+  });
+  if (scrollY) window.scrollTo(0, scrollY);
+})();
 
 function fmtCatalogTime(ts) {
   if (!ts) return 'never';
@@ -2005,8 +1992,29 @@ function backToContacts() {
   activeChat = null;
 }
 
-function filterContacts(q) {
+var contactSearchTimer = null, contactSearchSeq = 0, contactSearchHits = null;
+function filterContacts(q, fromServer) {
   var query       = q.toLowerCase().trim();
+  // Instant pass on phone/name/school/preview, then (debounced) the server searches everything
+  // ever said in each conversation and its result replaces the local match.
+  if (!fromServer) {
+    contactSearchHits = null;
+    clearTimeout(contactSearchTimer);
+    if (query) {
+      var seq = ++contactSearchSeq;
+      contactSearchTimer = setTimeout(async function() {
+        try {
+          var r = await fetch('/admin/api/search?q=' + encodeURIComponent(query));
+          if (!r.ok || seq !== contactSearchSeq) return;
+          var phones = await r.json();
+          if (seq !== contactSearchSeq) return;
+          contactSearchHits = {};
+          phones.forEach(function(p) { contactSearchHits[p] = true; });
+          filterContacts(q, true);
+        } catch (e) {}
+      }, 300);
+    }
+  }
   var activeDomain = (document.querySelector('.wa-filt.wa-filt-active') || {id:'filt-all'}).id.replace('filt-','');
   // Splitting into words and requiring every word to match (in any order, anywhere in the
   // conversation) makes multi-word searches like a full name work, not just exact substrings.
@@ -2014,7 +2022,8 @@ function filterContacts(q) {
   document.querySelectorAll('.wa-contact').forEach(function(c) {
     var blob    = (c.dataset.search || c.dataset.phone || '').toLowerCase();
     var domain  = c.dataset.domain || 'general';
-    var matchSearch = terms.length === 0 || terms.every(function(t) { return blob.includes(t); });
+    var matchSearch = terms.length === 0 || terms.every(function(t) { return blob.includes(t); })
+      || !!(contactSearchHits && contactSearchHits[c.dataset.phone]);
     var matchDomain = activeDomain === 'all' || domain === activeDomain;
     c.style.display = (matchSearch && matchDomain) ? '' : 'none';
   });
@@ -2067,6 +2076,7 @@ function openEditLeadModal(btn) {
   document.getElementById('al-submit').textContent = 'Save Changes';
   document.getElementById('al-id').value = btn.dataset.id;
   document.getElementById('al-name').value = btn.dataset.name || '';
+  document.getElementById('al-org').value = btn.dataset.org || '';
   document.getElementById('al-phone').value = btn.dataset.phone || '';
   document.getElementById('al-service').value = btn.dataset.service || 'solar';
   document.getElementById('al-location').value = btn.dataset.location || '';
@@ -2086,6 +2096,7 @@ async function submitAddLead(event) {
   var leadId = document.getElementById('al-id').value;
   var payload = {
     name: document.getElementById('al-name').value.trim(),
+    organization: document.getElementById('al-org').value.trim(),
     phone: document.getElementById('al-phone').value.trim(),
     service: document.getElementById('al-service').value,
     location: document.getElementById('al-location').value.trim(),
@@ -2815,6 +2826,72 @@ async function sendSolarQuote() {
   }
 }
 
+// ── Leads / Callbacks CSV export by date range ───────────────────────────────────────────
+function onExportRangeChange(p) {
+  document.getElementById(p + '-custom').hidden = document.getElementById(p + '-range').value !== 'custom';
+  applyRangeFilter(p);
+}
+function ymdLocal(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+// Selected range as inclusive YYYY-MM-DD strings ('' = open-ended). Shared by the table
+// filter and the CSV export so both always cover exactly the same rows.
+function getExportRange(p) {
+  var range = document.getElementById(p + '-range').value;
+  var today = new Date();
+  var from = '', to = '';
+  if (range === 'today') { from = to = ymdLocal(today); }
+  else if (range === '7' || range === '30' || range === '90') {
+    var start = new Date(today); start.setDate(start.getDate() - (Number(range) - 1));
+    from = ymdLocal(start); to = ymdLocal(today);
+  } else if (range === 'thismonth') {
+    from = ymdLocal(new Date(today.getFullYear(), today.getMonth(), 1)); to = ymdLocal(today);
+  } else if (range === 'lastmonth') {
+    from = ymdLocal(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+    to = ymdLocal(new Date(today.getFullYear(), today.getMonth(), 0));
+  } else if (range === 'custom') {
+    from = document.getElementById(p + '-from').value; to = document.getElementById(p + '-to').value;
+  }
+  return { range: range, from: from, to: to };
+}
+// Hides table rows outside the selected range. Day boundaries are Kenya time (UTC+3),
+// matching exportDateRange() on the server.
+function applyRangeFilter(p) {
+  var r = getExportRange(p);
+  var fromMs = r.from ? Date.parse(r.from + 'T00:00:00+03:00') : -Infinity;
+  var toMs   = r.to ? Date.parse(r.to + 'T00:00:00+03:00') + 86400000 : Infinity;
+  var rows = document.querySelectorAll('#' + p + '-list tr[data-ts]');
+  var shown = 0;
+  rows.forEach(function (tr) {
+    var t = Number(tr.dataset.ts);
+    var ok = t >= fromMs && t < toMs;
+    tr.hidden = !ok;
+    if (ok) shown++;
+  });
+  var list = document.getElementById(p + '-list');
+  var empty = list && list.querySelector('.range-empty');
+  if (list && rows.length && !shown && !empty) {
+    empty = document.createElement('div');
+    empty.className = 'tbl-empty range-empty';
+    empty.innerHTML = '<p>Nothing in this date range.</p>';
+    list.appendChild(empty);
+  }
+  if (empty) empty.hidden = shown > 0;
+  var count = document.getElementById(p + '-count');
+  if (count) count.textContent = r.range === 'all' ? '' : 'Showing ' + shown + ' of ' + rows.length;
+}
+function exportRangeCsv(p, url) {
+  var r = getExportRange(p);
+  if (r.range === 'custom') {
+    if (!r.from && !r.to) { toast('Pick a From and/or To date', 'err'); return; }
+    if (r.from && r.to && r.from > r.to) { toast('From date is after To date', 'err'); return; }
+  }
+  var qs = [];
+  if (r.from) qs.push('from=' + r.from);
+  if (r.to) qs.push('to=' + r.to);
+  window.location.href = url + (qs.length ? '?' + qs.join('&') : '');
+}
+
 // ── Solar Pricing tab (tier templates) ───────────────────────────────────────
 
 async function saveSolarSetting(key) {
@@ -2835,6 +2912,9 @@ function openSolarTierModal(btn) {
   document.getElementById('st-keyinput').disabled = !!btn;
   document.getElementById('st-label').value = btn ? btn.dataset.label : '';
   document.getElementById('st-sort').value = btn ? btn.dataset.sort : '0';
+  // Copying only applies when creating a tier — an existing tier already has its own items.
+  document.getElementById('st-copy').value = '';
+  document.getElementById('st-copy-wrap').hidden = !!btn;
   document.getElementById('solarTierOverlay').style.display = 'flex';
 }
 function closeSolarTierModal() { document.getElementById('solarTierOverlay').style.display = 'none'; }
@@ -2846,7 +2926,10 @@ async function submitSolarTier() {
   try {
     var r = await fetch('/admin/api/solar-pricing/tiers', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tier_key: tierKey, label: label, sort_order: Number(document.getElementById('st-sort').value || 0) }),
+      body: JSON.stringify({
+        tier_key: tierKey, label: label, sort_order: Number(document.getElementById('st-sort').value || 0),
+        copy_from: document.getElementById('st-key').value ? '' : document.getElementById('st-copy').value,
+      }),
     });
     if (!r.ok) throw new Error((await r.json()).error || 'Failed');
     location.reload();
@@ -2870,6 +2953,9 @@ function openSolarLineItemModal(btn, tierKey) {
   document.getElementById('sli-category').value = btn ? btn.dataset.category : 'taxable';
   document.getElementById('sli-qty').value = btn ? btn.dataset.qty : '1';
   document.getElementById('sli-rate').value = btn ? btn.dataset.rate : '';
+  // Carried through so an edit keeps the item's position — the list is ordered by sort_order,
+  // and omitting it on save reset it to 0 and bumped the edited item to the top of its tier.
+  document.getElementById('sli-id').dataset.sort = btn ? (btn.dataset.sort || '0') : '';
   document.getElementById('solarLineItemOverlay').style.display = 'flex';
 }
 function closeSolarLineItemModal() { document.getElementById('solarLineItemOverlay').style.display = 'none'; }
@@ -2883,23 +2969,70 @@ async function submitSolarLineItem() {
     default_qty: Number(document.getElementById('sli-qty').value),
     default_rate: Number(document.getElementById('sli-rate').value),
   };
+  if (id) {
+    payload.sort_order = Number(document.getElementById('sli-id').dataset.sort || 0);
+  } else {
+    // New items go to the bottom of their tier rather than the top.
+    var maxSort = 0;
+    document.querySelectorAll('#solar-tier-items-' + payload.tier_key + ' button[data-id][data-sort]').forEach(function (b) {
+      maxSort = Math.max(maxSort, Number(b.dataset.sort) || 0);
+    });
+    payload.sort_order = maxSort + 1;
+  }
   if (!payload.name) { toast('Name is required', 'err'); return; }
   try {
     var r = await fetch('/admin/api/solar-pricing/line-items' + (id ? '/' + id : ''), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error((await r.json()).error || 'Failed');
-    location.reload();
+    closeSolarLineItemModal();
+    await refreshSolarTierItems(payload.tier_key);
+    toast('Line item saved', 'ok');
   } catch (err) { toast('Could not save line item: ' + err.message, 'err'); }
 }
 
-async function deleteSolarLineItem(id) {
+async function deleteSolarLineItem(id, tierKey) {
   if (!confirm('Delete this line item?')) return;
   try {
     var r = await fetch('/admin/api/solar-pricing/line-items/' + id + '/delete', { method: 'POST' });
     if (!r.ok) throw new Error((await r.json()).error || 'Failed');
-    location.reload();
+    await refreshSolarTierItems(tierKey);
+    toast('Line item deleted', 'ok');
   } catch (err) { toast('Could not delete line item: ' + err.message, 'err'); }
+}
+
+// Re-renders one tier's line-item table from the small solar-pricing JSON endpoint instead of
+// reloading the whole dashboard — a full /admin reload rebuilds every chat/lead/analytics
+// section (slow) and lands back on the Chats tab. Markup mirrors solarTiersHTML server-side.
+function escSolar(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+async function refreshSolarTierItems(tierKey) {
+  var r = await fetch('/admin/api/solar-pricing');
+  if (!r.ok) { location.reload(); return; }
+  solarPricingCache = await r.json();
+  var items = solarPricingCache.lineItems.filter(function (li) { return li.tier_key === tierKey; });
+  var html;
+  if (!items.length) {
+    html = '<div class="tbl-empty"><div>&#9728;&#65039;</div><p>No line items in this tier yet.</p></div>';
+  } else {
+    html = '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Category</th><th>Default Qty</th><th>Default Rate (KShs)</th><th></th></tr></thead><tbody>' +
+      items.map(function (li) {
+        return '<tr><td class="wrap-cell">' + escSolar(li.name) + '</td>' +
+          '<td class="nowrap">' + (li.category === 'exempt' ? '<span class="chip chip-general">VAT-exempt</span>' : '<span class="chip chip-warning">Taxable</span>') + '</td>' +
+          '<td class="nowrap">' + li.default_qty + '</td>' +
+          '<td class="nowrap">KShs ' + Number(li.default_rate).toLocaleString() + '</td>' +
+          '<td class="nowrap">' +
+            '<button type="button" class="resolve-btn" data-id="' + li.id + '" data-tier="' + escSolar(tierKey) + '" data-category="' + escSolar(li.category) + '" data-name="' + escSolar(li.name) + '" ' +
+              'data-qty="' + escSolar(li.default_qty) + '" data-rate="' + escSolar(li.default_rate) + '" data-sort="' + escSolar(li.sort_order) + '" onclick="openSolarLineItemModal(this)">Edit</button> ' +
+            '<button type="button" class="resolve-btn" onclick="deleteSolarLineItem(' + li.id + ',\\'' + escSolar(tierKey) + '\\')">Delete</button>' +
+          '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+  var box = document.getElementById('solar-tier-table-' + tierKey);
+  if (box) box.innerHTML = html;
+  var count = document.getElementById('solar-tier-count-' + tierKey);
+  if (count) count.textContent = '(' + items.length + ' items)';
 }
 
 function toggleSolarTier(tierKey, headingEl) {
@@ -2908,6 +3041,11 @@ function toggleSolarTier(tierKey, headingEl) {
   var open = box.style.display !== 'none';
   box.style.display = open ? 'none' : '';
   arrow.classList.toggle('open', !open);
+  try {
+    var openTiers = JSON.parse(sessionStorage.getItem('adminOpenSolarTiers') || '[]').filter(function (k) { return k !== tierKey; });
+    if (!open) openTiers.push(tierKey);
+    sessionStorage.setItem('adminOpenSolarTiers', JSON.stringify(openTiers));
+  } catch (e) {}
 }
 
 // Generic collapsible-section toggle for the Drilling Quote modal — same show/hide-by-id
@@ -3469,7 +3607,7 @@ function renderSingleMsg(msg, pid) {
   var imgBlock = msg.content.find(function(b){ return b.type==='image'; });
   if (imgBlock && msg.role==='user') {
     var capBlock = msg.content.find(function(b){ return b.type==='text'; });
-    var src = 'data:'+((imgBlock.source&&imgBlock.source.media_type)||'image/jpeg')+';base64,'+((imgBlock.source&&imgBlock.source.data)||'');
+    var src = imgBlock.url || ('data:'+((imgBlock.source&&imgBlock.source.media_type)||'image/jpeg')+';base64,'+((imgBlock.source&&imgBlock.source.data)||''));
     return '<div class="wa-row wa-row-in"'+idAttr+'><div class="wa-bubble wa-in wa-img-bubble">' +
       quote +
       '<img class="wa-img" src="'+src+'" alt="Photo from customer" loading="lazy" onclick="openLightbox(this.src)"/>' +
@@ -3529,9 +3667,14 @@ async function fetchNewMessages(pid, phone, autoScroll) {
     var r = await fetch('/admin/api/messages/'+encodeURIComponent(phone)+'/since-id/'+lastId);
     if (!r.ok) return;
     var newMsgs = await r.json();
-    if (!newMsgs.length) return;
     var msgs = document.getElementById('chatmsgs-'+pid);
     if (!msgs) return;
+    // First load after opening the chat: drop the placeholder and put the history ABOVE anything
+    // already in the pane (e.g. a message sent before the history finished loading).
+    var loading = msgs.querySelector('.wa-msgs-loading');
+    var anchor = null;
+    if (loading) { anchor = loading.nextSibling; loading.remove(); }
+    if (!newMsgs.length) return;
     var atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
     var rendered = false;
     newMsgs.forEach(function(msg) {
@@ -3545,7 +3688,7 @@ async function fetchNewMessages(pid, phone, autoScroll) {
       if (html) {
         var tmp = document.createElement('div');
         tmp.innerHTML = html;
-        while (tmp.firstChild) msgs.appendChild(tmp.firstChild);
+        while (tmp.firstChild) msgs.insertBefore(tmp.firstChild, anchor);
         rendered = true;
       }
       if (msg.id > (chatLastId[pid]||0)) chatLastId[pid] = msg.id;
@@ -3725,32 +3868,24 @@ window.addEventListener('DOMContentLoaded', function() {
 app.get('/admin', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
   try {
-    const sessions     = await db.getAllSessionsWithMessages();
-    const leads        = await db.getAllLeads();
-    const callbacks    = await db.getAllCallbacks();
-    const escalations  = await db.getAllEscalations();
-    const productCount = await db.getProductCount();
-    const [towerFoundation, towerTanks, towerPackages] = await Promise.all([
-      db.getTowerFoundationPrices(),
-      db.getTowerTankPrices(),
-      db.getTowerPackages(),
+    const [
+      sessionList, leads, callbacks, escalations, productCount,
+      towerFoundation, towerTanks, towerPackages,
+      drillingSettings, drillingPenetrationRates, drillingConsumables, drillingMobilization,
+      solarSettings, solarTiers, solarLineItems,
+      blockedNumbers, analytics,
+    ] = await Promise.all([
+      db.getSessionsSummary(), db.getAllLeads(), db.getAllCallbacks(), db.getAllEscalations(), db.getProductCount(),
+      db.getTowerFoundationPrices(), db.getTowerTankPrices(), db.getTowerPackages(),
+      db.getDrillingSettings(), db.getDrillingPenetrationRates(), db.getDrillingLineItems('consumable'), db.getDrillingLineItems('mobilization'),
+      db.getSolarSettings(), db.getSolarKvaTiers(), db.getSolarLineItems(),
+      db.getBlockedNumbers(), db.getAnalyticsSummary(),
     ]);
+    const sessions = {};
+    for (const s of sessionList) sessions[s.phone] = s;
     const towerPricing = { foundation: towerFoundation, tanks: towerTanks, packages: towerPackages };
-    const [drillingSettings, drillingPenetrationRates, drillingConsumables, drillingMobilization] = await Promise.all([
-      db.getDrillingSettings(),
-      db.getDrillingPenetrationRates(),
-      db.getDrillingLineItems('consumable'),
-      db.getDrillingLineItems('mobilization'),
-    ]);
     const drillingPricing = { settings: drillingSettings, penetrationRates: drillingPenetrationRates, consumables: drillingConsumables, mobilization: drillingMobilization };
-    const [solarSettings, solarTiers, solarLineItems] = await Promise.all([
-      db.getSolarSettings(),
-      db.getSolarKvaTiers(),
-      db.getSolarLineItems(),
-    ]);
     const solarPricing = { settings: solarSettings, tiers: solarTiers, lineItems: solarLineItems };
-    const blockedNumbers = await db.getBlockedNumbers();
-    const analytics = await db.getAnalyticsSummary();
     res.send(buildAdminPage(sessions, leads, callbacks, escalations, req.session.email, productCount, towerPricing, drillingPricing, solarPricing, blockedNumbers, analytics));
   } catch (err) {
     console.error('[admin] DB error:', err.message);
@@ -4011,15 +4146,17 @@ app.get('/admin/api/export/conversations.csv', async (req, res) => {
   } catch (err) { res.status(500).send('Export error: ' + err.message); }
 });
 
-// CSV export of all leads
+// CSV export of leads, optionally limited to a capture-date range (?from/?to — see exportDateRange)
 app.get('/admin/api/leads/export.csv', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
   try {
-    const leads = await db.getAllLeads();
-    const header = ['Status','Name','Phone','Service','Location','Property Type','Budget','Notes','Captured'];
+    const range = exportDateRange(req.query);
+    const leads = (await db.getAllLeads()).filter(l => range.inRange(l.captured_at));
+    const header = ['Status','Name','School / Organization','Phone','Service','Location','Property Type','Budget','Notes','Captured'];
     const rows = leads.map(l => [
       csvCell(l.status),
       csvCell(l.name),
+      csvCell(l.organization || ''),
       csvTextCell(l.phone),
       csvCell(l.service),
       csvCell(l.location),
@@ -4029,7 +4166,31 @@ app.get('/admin/api/leads/export.csv', async (req, res) => {
       csvCell(fmtExportDate(l.captured_at)),
     ].join(','));
     const csv = [header.map(csvCell).join(','), ...rows].join('\r\n');
-    const filename = 'waterlift-leads-' + new Date().toISOString().slice(0, 10) + '.csv';
+    const filename = 'waterlift-leads-' + range.tag + '.csv';
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
+    res.send(csv);
+  } catch (err) { res.status(500).send('Export error: ' + err.message); }
+});
+
+// CSV export of callbacks, optionally limited to a booked-at date range (?from/?to — see
+// exportDateRange). Filters on booked_at, not preferred_date, since the latter is free text.
+app.get('/admin/api/callbacks/export.csv', async (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  try {
+    const range = exportDateRange(req.query);
+    const callbacks = (await db.getAllCallbacks()).filter(c => range.inRange(c.booked_at));
+    const header = ['Name','Phone','Preferred Date','Preferred Time','Notes','Booked At'];
+    const rows = callbacks.map(c => [
+      csvCell(c.name || ''),
+      csvTextCell(c.phone || ''),
+      csvCell(c.preferred_date || ''),
+      csvCell(c.preferred_time || ''),
+      csvCell(c.notes || ''),
+      csvCell(fmtExportDate(c.booked_at)),
+    ].join(','));
+    const csv = [header.map(csvCell).join(','), ...rows].join('\r\n');
+    const filename = 'waterlift-callbacks-' + range.tag + '.csv';
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
     res.send(csv);
@@ -4475,10 +4636,11 @@ app.post('/admin/api/solar-pricing/settings', async (req, res) => {
 app.post('/admin/api/solar-pricing/tiers', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
   try {
-    const { tier_key, label, sort_order } = req.body || {};
+    const { tier_key, label, sort_order, copy_from } = req.body || {};
     if (!tier_key || !label) return res.status(400).json({ error: 'tier_key and label are required' });
     await db.upsertSolarKvaTier({ tier_key, label, sort_order: Number(sort_order || 0) });
-    res.json({ ok: true, tier_key });
+    const copied = copy_from && copy_from !== tier_key ? await db.copySolarLineItems(copy_from, tier_key) : 0;
+    res.json({ ok: true, tier_key, copied });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -4588,10 +4750,11 @@ app.post('/admin/api/quotes/solar/send/:phone', async (req, res) => {
 app.post('/admin/api/leads', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
   try {
-    const { name, phone, service, location, property_type, estimated_budget, notes } = req.body || {};
+    const { name, organization, phone, service, location, property_type, estimated_budget, notes } = req.body || {};
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
     await db.insertLead({
       name: String(name).trim(),
+      organization: organization ? String(organization).trim() : null,
       phone: normalizePhone(phone),
       service: service || null,
       location: location || null,
@@ -4608,10 +4771,11 @@ app.post('/admin/api/leads', async (req, res) => {
 app.post('/admin/api/leads/:id/update', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
   try {
-    const { name, phone, service, location, property_type, estimated_budget, notes } = req.body || {};
+    const { name, organization, phone, service, location, property_type, estimated_budget, notes } = req.body || {};
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
     await db.updateLead(Number(req.params.id), {
       name: String(name).trim(),
+      organization: organization ? String(organization).trim() : null,
       phone: normalizePhone(phone),
       service: service || null,
       location: location || null,
@@ -4641,7 +4805,39 @@ app.get('/admin/api/sessions', async (req, res) => {
 // see getMessagesSinceId for why: avoids client/server clock-skew bugs)
 app.get('/admin/api/messages/:phone/since-id/:id', async (req, res) => {
   if (!requireAdminAuth(req, res)) return;
-  try { res.json(await db.getMessagesSinceId(req.params.phone, Number(req.params.id))); }
+  try {
+    const msgs = await db.getMessagesSinceId(req.params.phone, Number(req.params.id));
+    // Customer photos are stored as base64 inside the message — replace each with a URL so the
+    // browser downloads it separately (and only when it scrolls into view).
+    for (const m of msgs) {
+      if (!Array.isArray(m.content)) continue;
+      m.content = m.content.map((b, i) => (b && b.type === 'image' && b.source && b.source.data)
+        ? { type: 'image', url: '/admin/api/message-image/' + m.id + '/' + i }
+        : b);
+    }
+    res.json(msgs);
+  }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// A customer photo stored inside a message, served as a real image (see the route above).
+app.get('/admin/api/message-image/:id/:idx', async (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  try {
+    const row = await db.getMessageContentById(req.params.id);
+    const block = row && Array.isArray(row.content) ? row.content[Number(req.params.idx)] : null;
+    if (!block || block.type !== 'image' || !block.source || !block.source.data) return res.status(404).send('Not found');
+    res.setHeader('Content-Type', block.source.media_type || 'image/jpeg');
+    // A stored message never changes, so the browser can keep the image for a long time.
+    res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+    res.send(Buffer.from(block.source.data, 'base64'));
+  } catch (err) { res.status(500).send('Error: ' + err.message); }
+});
+
+// Contact search across full conversation text (see db.searchConversations).
+app.get('/admin/api/search', async (req, res) => {
+  if (!requireAdminAuth(req, res)) return;
+  try { res.json(await db.searchConversations(String(req.query.q || '').slice(0, 200))); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 

@@ -184,7 +184,7 @@ async function getApiMessages(phone, limit = 20) {
 // admin sends a quotation file or photo (no `source`, since there's no image/PDF data to hand
 // back to Claude for those). Sending our shape under a reserved name makes Claude reject the
 // whole request with a 400. Swap both for a plain text block here (Claude-facing only — the
-// admin dashboard's own rendering reads from getAllSessionsWithMessages/getMessagesSinceId
+// admin dashboard's own rendering reads from getMessagesSinceId
 // instead, so its rich document/photo bubble is unaffected). A customer-sent image block
 // always has `source` (real base64 data), so it passes through untouched.
 function sanitizeForClaude(content) {
@@ -329,13 +329,15 @@ async function getMessagesSinceId(phone, sinceId) {
   }));
 }
 
-// Lightweight sessions summary for polling (no full message history)
+// Lightweight sessions summary (no full message history) — used both for the admin page's
+// initial contact list and for polling. Each conversation's messages are loaded on demand
+// (getMessagesSinceId) only when that chat is opened.
 async function getSessionsSummary() {
   const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
   if (!sessions.length) return [];
   const phones = sessions.map(s => s.phone);
   const [lastMsgs] = await pool.query(
-    `SELECT m.phone, m.role, m.content, m.source, m.ts
+    `SELECT m.id, m.phone, m.role, m.content, m.source, m.ts
      FROM messages m
      INNER JOIN (SELECT phone, MAX(id) as max_id FROM messages WHERE phone IN (${phones.map(() => '?').join(',')}) GROUP BY phone) t
      ON m.phone = t.phone AND m.id = t.max_id`,
@@ -343,7 +345,7 @@ async function getSessionsSummary() {
   );
   const lastMsgMap = {};
   for (const m of lastMsgs) {
-    lastMsgMap[m.phone] = { role: m.role, content: parseContent(m.content), source: m.source, ts: Number(m.ts) };
+    lastMsgMap[m.phone] = { id: m.id, role: m.role, content: parseContent(m.content), source: m.source, ts: Number(m.ts) };
   }
   return sessions.map(s => ({
     phone:         s.phone,
@@ -356,51 +358,48 @@ async function getSessionsSummary() {
   }));
 }
 
-// All sessions with their full message history (admin dashboard)
-async function getAllSessionsWithMessages() {
-  const [sessions] = await pool.query('SELECT * FROM sessions ORDER BY last_seen DESC');
-  const [messages] = await pool.query(
-    'SELECT id, phone, role, content, source, ts, wa_message_id, reply_context FROM messages ORDER BY ts ASC, id ASC'
-  );
-
-  const msgMap = {};
-  for (const m of messages) {
-    if (!msgMap[m.phone]) msgMap[m.phone] = [];
-    msgMap[m.phone].push({
-      id:           m.id,
-      role:         m.role,
-      content:      parseContent(m.content),
-      source:       m.source,
-      ts:           Number(m.ts),
-      waMessageId:  m.wa_message_id || null,
-      replyContext: m.reply_context ? parseContent(m.reply_context) : null,
-    });
+// Admin contact search: phones whose conversation matches every term (each term may match a
+// different place — phone number, lead name/school, or anything said in any message). Runs in
+// SQL so the dashboard no longer has to ship every conversation's full text to the browser.
+// Rows holding customer photos are skipped: their base64 payload would make short terms match
+// almost everything.
+async function searchConversations(query) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
+  if (!terms.length) return [];
+  const clauses = [];
+  const params = [];
+  for (const t of terms) {
+    const like = '%' + t.replace(/[\\%_]/g, c => '\\' + c) + '%';
+    clauses.push(`(s.phone LIKE ?
+      OR EXISTS (SELECT 1 FROM leads l WHERE l.phone = s.phone AND (l.name LIKE ? OR l.organization LIKE ?))
+      OR EXISTS (SELECT 1 FROM messages m WHERE m.phone = s.phone
+                   AND (m.source IS NULL OR m.source <> 'system')
+                   AND m.content NOT LIKE '%"type":"base64"%'
+                   AND m.content LIKE ?))`);
+    params.push(like, like, like, like);
   }
+  const [rows] = await pool.query('SELECT s.phone FROM sessions s WHERE ' + clauses.join(' AND '), params);
+  return rows.map(r => r.phone);
+}
 
-  const result = {};
-  for (const s of sessions) {
-    result[s.phone] = {
-      domain:        s.domain,
-      lastSeen:      Number(s.last_seen),
-      escalated:     !!s.escalated,
-      humanTakeover: !!s.human_takeover,
-      adReferral:    s.ad_referral ? parseContent(s.ad_referral) : null,
-      messages:      msgMap[s.phone] || [],
-    };
-  }
-  return result;
+// One stored message's content by id — serves a customer photo to the admin dashboard as a
+// real image URL instead of inlining its base64 into the page.
+async function getMessageContentById(id) {
+  const [rows] = await pool.query('SELECT phone, content FROM messages WHERE id = ?', [Number(id)]);
+  if (!rows.length) return null;
+  return { phone: rows[0].phone, content: parseContent(rows[0].content) };
 }
 
 // ── Leads ─────────────────────────────────────────────────────────────────────
 
 async function insertLead(lead) {
   const [result] = await pool.query(
-    `INSERT INTO leads (name, phone, location, service, property_type, estimated_budget, notes, status, captured_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
+    `INSERT INTO leads (name, organization, phone, location, service, property_type, estimated_budget, notes, status, captured_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
     [
       // location/service/property_type are optional on qualify_lead (e.g. mid-complaint
       // escalations rarely have all of them) — default to null since mysql2 rejects undefined.
-      lead.name, lead.phone, lead.location || null, lead.service || null,
+      lead.name, lead.organization || null, lead.phone, lead.location || null, lead.service || null,
       lead.property_type || null, lead.estimated_budget || null, lead.notes || null,
       new Date(lead.capturedAt),
     ]
@@ -410,10 +409,10 @@ async function insertLead(lead) {
 
 async function updateLead(id, lead) {
   await pool.query(
-    `UPDATE leads SET name = ?, phone = ?, location = ?, service = ?, property_type = ?,
+    `UPDATE leads SET name = ?, organization = ?, phone = ?, location = ?, service = ?, property_type = ?,
        estimated_budget = ?, notes = ? WHERE id = ?`,
     [
-      lead.name, lead.phone, lead.location, lead.service,
+      lead.name, lead.organization || null, lead.phone, lead.location, lead.service,
       lead.property_type, lead.estimated_budget || null, lead.notes || null,
       id,
     ]
@@ -545,6 +544,16 @@ async function searchProducts(query, limit = 8) {
         OR name LIKE ? OR category LIKE ?
      LIMIT ?`,
     [query, `%${query}%`, `%${query}%`, limit]
+  );
+  return rows;
+}
+
+// Catalog rows for specific retailer ids — lets show_products skip items with no public price.
+async function getProductsByRetailerIds(ids) {
+  if (!ids || !ids.length) return [];
+  const [rows] = await pool.query(
+    `SELECT retailer_id, name, price FROM products WHERE retailer_id IN (${ids.map(() => '?').join(',')})`,
+    ids.map(String)
   );
   return rows;
 }
@@ -754,6 +763,20 @@ async function deleteSolarLineItem(id) {
   await pool.query('DELETE FROM solar_line_items WHERE id = ?', [id]);
 }
 
+// Seeds a new tier with a copy of another tier's line items so the admin edits a starting BOQ
+// instead of re-entering every item. Skipped if the target already has items, so it can never
+// duplicate items into an existing tier.
+async function copySolarLineItems(fromTierKey, toTierKey) {
+  const [[{ n }]] = await pool.query('SELECT COUNT(*) AS n FROM solar_line_items WHERE tier_key = ?', [toTierKey]);
+  if (n > 0) return 0;
+  const [result] = await pool.query(
+    'INSERT INTO solar_line_items (tier_key, category, name, default_qty, default_rate, sort_order) ' +
+    'SELECT ?, category, name, default_qty, default_rate, sort_order FROM solar_line_items WHERE tier_key = ? ORDER BY sort_order, id',
+    [toTierKey, fromTierKey]
+  );
+  return result.affectedRows;
+}
+
 module.exports = {
   getAdminUserByEmail,
   createAdminUser,
@@ -774,7 +797,9 @@ module.exports = {
   getAnalyticsSummary,
   getMessagesSinceId,
   getSessionsSummary,
-  getAllSessionsWithMessages,
+  searchConversations,
+  getProductsByRetailerIds,
+  getMessageContentById,
   insertLead,
   updateLead,
   updateLeadStatus,
@@ -818,4 +843,5 @@ module.exports = {
   getSolarLineItems,
   upsertSolarLineItem,
   deleteSolarLineItem,
+  copySolarLineItems,
 };

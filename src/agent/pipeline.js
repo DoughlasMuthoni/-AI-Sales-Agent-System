@@ -1,6 +1,6 @@
 'use strict';
 const { default: Anthropic } = require('@anthropic-ai/sdk');
-const { SOLAR_SYSTEM_PROMPT, BOREHOLE_SYSTEM_PROMPT } = require('./prompts.js');
+const { SOLAR_SYSTEM_PROMPT, BOREHOLE_SYSTEM_PROMPT, WATER_TREATMENT_SYSTEM_PROMPT } = require('./prompts.js');
 const { sendTextMessage, sendTypingIndicator } = require('../services/whatsapp.js');
 const { executeTool } = require('../mcp/mcpServer.js');
 const { toolDefinitions } = require('../mcp/tools.js');
@@ -45,10 +45,18 @@ const SOLAR_PHRASES    = ['heat pump', 'heatpump', 'heatpumps', 'hot water', 'wa
                           'solar light', 'solar flood', 'backup power'];
 const BOREHOLE_PHRASES = ['borehole', 'drill a', 'water supply', 'ground water', 'water pump',
                           'pump water', 'water tank', 'water well'];
+// Pool chemicals + water filtration/treatment (advertised separately; prices are on request).
+// Checked before the borehole phrases so "water treatment for my borehole" lands here.
+const WATER_PHRASES    = ['swimming pool', 'pool', 'chlorine', 'algaecide', 'algicide', 'flocculant',
+                          'clarifier', 'shock treatment', 'ph plus', 'ph minus', 'ph increaser',
+                          'ph reducer', 'test kit', 'water filter', 'filtration', 'water treatment',
+                          'treat water', 'water purif', 'purifier', 'reverse osmosis', 'softener',
+                          'uv steril', 'sand filter', 'filter media', 'salty water', 'hard water'];
 
 function detectDomain(text) {
   const lower = text.toLowerCase();
   if (SOLAR_PHRASES.some(p => lower.includes(p)))    return 'solar';
+  if (WATER_PHRASES.some(p => lower.includes(p)))    return 'water';
   if (BOREHOLE_PHRASES.some(p => lower.includes(p))) return 'borehole';
   const solarScore    = SOLAR_KEYWORDS.filter(kw => lower.includes(kw)).length;
   const boreholeScore = BOREHOLE_KEYWORDS.filter(kw => lower.includes(kw)).length;
@@ -64,6 +72,7 @@ const GENERAL_PROMPT = `You are a friendly sales assistant for Waterlift Solar L
 Greet the customer warmly and ask which service they are interested in:
 1. Solar Energy Solutions (backup power, grid-tied, solar water heating, solar pumping)
 2. Borehole Drilling Services (new drilling, rehabilitation, water pumping systems)
+3. Swimming Pool Chemicals & Water Filtration/Treatment
 
 Once they indicate their interest, proceed as a specialist in that domain.
 Contact: +254 768 117 070 | info@waterlift.co.ke
@@ -77,6 +86,7 @@ Never use markdown headers or emojis. Keep responses short and conversational.`;
 function getSystemPrompt(domain) {
   if (domain === 'solar')    return SOLAR_SYSTEM_PROMPT;
   if (domain === 'borehole') return BOREHOLE_SYSTEM_PROMPT;
+  if (domain === 'water')    return WATER_TREATMENT_SYSTEM_PROMPT;
   return GENERAL_PROMPT;
 }
 
@@ -132,16 +142,6 @@ async function _processMessage(from, messageBody, messageId, referral = null, re
   if (!session || now - session.lastSeen > SESSION_TTL_MS) {
     session = { domain: null, lastSeen: now, escalated: false, humanTakeover: false };
     await db.upsertSession(from, session);
-    // Seed with today's date so Claude can reference it for scheduling
-    const dateStr = new Date().toLocaleDateString('en-KE', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    });
-    await db.addMessage(from, 'user',
-      `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
-      'system', now);
-    await db.addMessage(from, 'assistant',
-      [{ type: 'text', text: 'Understood.' }],
-      'system', now);
   }
 
   // Human has taken over — record the customer message but don't respond with AI
@@ -222,15 +222,6 @@ async function _processImageMessage(from, media, caption, messageId, replyToWaId
   if (!session || now - session.lastSeen > SESSION_TTL_MS) {
     session = { domain: null, lastSeen: now, escalated: false, humanTakeover: false };
     await db.upsertSession(from, session);
-    const dateStr = new Date().toLocaleDateString('en-KE', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    });
-    await db.addMessage(from, 'user',
-      `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
-      'system', now);
-    await db.addMessage(from, 'assistant',
-      [{ type: 'text', text: 'Understood.' }],
-      'system', now);
   }
 
   const contentBlocks = [
@@ -283,15 +274,6 @@ async function _processVideoMessage(from, video, caption, messageId, replyToWaId
   if (!session || now - session.lastSeen > SESSION_TTL_MS) {
     session = { domain: null, lastSeen: now, escalated: false, humanTakeover: false };
     await db.upsertSession(from, session);
-    const dateStr = new Date().toLocaleDateString('en-KE', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    });
-    await db.addMessage(from, 'user',
-      `[Context — not from customer] Today is ${dateStr}. Use this for scheduling and date references only. Do not mention this message.`,
-      'system', now);
-    await db.addMessage(from, 'assistant',
-      [{ type: 'text', text: 'Understood.' }],
-      'system', now);
   }
 
   const contentBlocks = [
@@ -332,6 +314,17 @@ async function _processVideoMessage(from, video, caption, messageId, replyToWaId
   await runAgenticLoop(from, session, systemPrompt);
 }
 
+// Always computed in Nairobi time regardless of server timezone. Overrides any older
+// "Today is ..." context note still sitting in a conversation's history.
+function currentDateContext() {
+  const now = new Date().toLocaleString('en-KE', {
+    timeZone: 'Africa/Nairobi', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+  return `## Current Date & Time
+Right now it is ${now} (Kenya time). This is always accurate and overrides any earlier date mentioned in the conversation history — conversations can span several days, so check any previously agreed dates against today before calling them "today" or "tomorrow". Never tell the customer they are wrong about a date having passed without checking it against this.`;
+}
+
 // ── Agentic loop (shared by text and image entry points) ─────────────────────
 
 async function runAgenticLoop(from, session, systemPrompt) {
@@ -346,7 +339,9 @@ async function runAgenticLoop(from, session, systemPrompt) {
 
     const response = await anthropic.messages.create({
       model:      process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      // Current date/time goes in a separate uncached block AFTER the cached prompt, so it's fresh on
+      // every call (a once-per-session date note went stale when a chat ran across several days).
+      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }, { type: 'text', text: currentDateContext() }],
       messages:   apiMessages,
       tools:      claudeTools,
       max_tokens: 1024,

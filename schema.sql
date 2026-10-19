@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS leads (
   id               INT UNSIGNED NOT NULL AUTO_INCREMENT,
   name             VARCHAR(255) DEFAULT NULL,
+  organization     VARCHAR(255) DEFAULT NULL,
   phone            VARCHAR(30)  DEFAULT NULL,
   location         VARCHAR(255) DEFAULT NULL,
   service          VARCHAR(20)  DEFAULT NULL,
@@ -100,10 +101,27 @@ CREATE TABLE IF NOT EXISTS escalations (
 -- 2026-08: escalations had no phone column, so an escalation raised without the model also
 -- calling qualify_lead was unlinkable to any real conversation (analysis found 70% of
 -- escalations fell into this gap). Unlike other additions in this file, phone belongs on this
--- existing table itself rather than in a new one, so this is a genuine ALTER TABLE for once —
--- kept idempotent via IF NOT EXISTS (MySQL 8.0.29+ / MariaDB 10.3+) so re-importing this file
--- stays safe on installs that already have the column.
-ALTER TABLE escalations ADD COLUMN IF NOT EXISTS phone VARCHAR(30) DEFAULT NULL AFTER customer_name;
+-- existing table itself rather than in a new one, so this is a genuine ALTER TABLE.
+--
+-- Column additions are made idempotent by checking information_schema first, NOT with
+-- "ADD COLUMN IF NOT EXISTS" — that syntax only exists on MySQL 8.0.29+ / MariaDB, and the
+-- live server rejects it (#1064). This form works on any MySQL 5.7+ and keeps re-importing
+-- this file safe on installs that already have the column.
+SET @has_col := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'escalations' AND COLUMN_NAME = 'phone');
+SET @ddl := IF(@has_col = 0,
+  'ALTER TABLE escalations ADD COLUMN phone VARCHAR(30) DEFAULT NULL AFTER customer_name',
+  'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 2026-10: school/organization name on leads (e.g. leads from the solar-for-schools ads), so
+-- the sales team knows which institution a contact person represents. Same idempotent pattern.
+SET @has_col := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leads' AND COLUMN_NAME = 'organization');
+SET @ddl := IF(@has_col = 0,
+  'ALTER TABLE leads ADD COLUMN organization VARCHAR(255) DEFAULT NULL AFTER name',
+  'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- Browser push subscriptions for the admin dashboard (one row per installed device)
 CREATE TABLE IF NOT EXISTS push_subscriptions (
